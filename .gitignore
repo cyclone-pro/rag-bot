@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.venv/
+env/
+venv/
+rag3/
+
+# VSCode
+.vscode/
+
+# Mac
+.DS_Store
+
+# Milvus/Temp
+*.log
+*.db
+*.sqlite
+*.parquet
+*.csv
+*.json
+*.zip
+
+# Credentials
+*.env
+.env.*
+*.key
+*.pem
