@@ -218,6 +218,8 @@ def main():
         return 2
 
     col = Collection(COLL_NAME)
+    field_types = build_field_type_map(col)   # <-- NEW
+
     have = {f.name for f in col.schema.fields}
     has_clouds_text = "clouds_text" in have
     has_clouds_arr  = "clouds" in have   # ARRAY field from create script
@@ -345,13 +347,13 @@ def main():
             part_buf[pname] = {fn: [] for fn in have_names}
 
     def flush_part(pname: str):
-    buf = part_buf.get(pname)
-    if not buf:
+     buf = part_buf.get(pname)
+     if not buf:
         return
 
-    field_names = list(buf.keys())
-    if not field_names:
-        return
+     field_names = list(buf.keys())
+     if not field_names:
+         return
 
     # Determine number of rows we’re about to send.
     # If any field has a list, use its length; if scalars sneak in, treat them as length-1.
