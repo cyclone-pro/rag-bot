@@ -209,7 +209,7 @@ def arr_contains_expr(field: str, values: List[str]) -> Optional[str]:
     clauses = [f'contains({field}, "{v}")' for v in values]
     return "(" + " or ".join(clauses) + ")"
 
-def build_scalar_expr(jd: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+"""def build_scalar_expr(jd: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     terms = []
     part = None
     rf = jd.get("role_family")
@@ -222,7 +222,28 @@ def build_scalar_expr(jd: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     cloud_expr = arr_contains_expr("clouds", jd.get("clouds", []))
     if cloud_expr:
         terms.append(cloud_expr)
+    return (" and ".join(terms)) if terms else "", part"""
+    
+def build_scalar_expr(jd: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    terms = []
+    part = None
+    rf = jd.get("role_family")
+    if rf:
+        terms.append(f'role_family == "{rf}"')
+        part = rf if rf in ROLE_FAMILIES else None
+    yb = jd.get("years_band")
+    if yb:
+        terms.append(f'years_band == "{yb}"')
+
+    # safer cloud filter
+    clouds = jd.get("clouds", [])
+    if clouds:
+        # Try substring match instead of contains()
+        cloud_clauses = [f'clouds like "%{c}%"' for c in clouds]
+        terms.append("(" + " or ".join(cloud_clauses) + ")")
+
     return (" and ".join(terms)) if terms else "", part
+
 
 def normalize_tokens(s: str) -> List[str]:
     if not s: return []
