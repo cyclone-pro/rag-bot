@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence
 
-from recruiterbrain.shared_config import (
+from shared_config import (
     COLLECTION,
     EF_SEARCH,
     EMBED_MODEL,
@@ -15,7 +15,7 @@ from recruiterbrain.shared_config import (
     get_encoder,
     get_milvus_client,
 )
-from recruiterbrain.shared_utils import (
+from shared_utils import (
     NETWORK_PAT,
     apply_model_prefix,
     attach_sim_scores,

@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-from recruiterbrain.core_retrieval import ann_search
-from recruiterbrain.shared_config import (
+from core_retrieval import ann_search
+from shared_config import (
     OPENAI_API_KEY,
     OPENAI_MODEL,
     RETURN_TOP,
@@ -13,7 +13,7 @@ from recruiterbrain.shared_config import (
     VECTOR_FIELD_DEFAULT,
     get_openai_client,
 )
-from recruiterbrain.shared_utils import render_candidate
+from shared_utils import render_candidate
 
 
 def _default_plan(question: str) -> Dict[str, Any]:
