@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>AI Interview Client — Minimal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+    video { width: 360px; height: 270px; background:#111; border-radius:12px; }
+    button { padding:10px 14px; border:0; border-radius:10px; background:#111; color:white; cursor:pointer;}
+    button:disabled { opacity:.5; cursor:not-allowed;}
+    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap:12px;}
+    .card { border:1px solid #ddd; border-radius:12px; padding:12px; }
+    pre { background:#0b0b0b; color:#e6e6e6; padding:12px; border-radius:10px; overflow:auto; max-height:300px;}
+    .pill { font-size:12px; background:#eef; color:#334; padding:2px 8px; border-radius:999px; margin-left:6px;}
+  </style>
+</head>
+<body>
+  <h2>AI Interview Client (Local-only signals)</h2>
+  <div class="row">
+    <button id="startBtn">Start Interview</button>
+    <button id="endBtn" disabled>End Interview</button>
+    <span id="status">idle</span>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Camera Preview <span class="pill">MediaPipe on-device</span></h3>
+      <video id="cam" autoplay playsinline muted></video>
+      <div id="visionStats"></div>
+    </div>
+    <div class="card">
+      <h3>Audio Monitor <span class="pill">Web Audio API</span></h3>
+      <div id="audioStats"></div>
+    </div>
+    <div class="card">
+      <h3>Activity <span class="pill">Browser Events</span></h3>
+      <div id="activityStats"></div>
+    </div>
+    <div class="card">
+      <h3>Live Log</h3>
+      <pre id="log"></pre>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:12px;">
+    <h3>Final Summary</h3>
+    <pre id="summary"></pre>
+  </div>
+
+  <!-- App glue -->
+  <script type="module">
+    import { startAudio, stopAudio }   from './audio.js';
+    import { startVision, stopVision, getMouthOpenApprox, getVisionState } from './vision.js';
+    import { initActivityHooks, getActivityState, resetActivity } from './activity.js';
+
+    const $ = (id)=>document.getElementById(id);
+    const log = (m)=>{ $("log").textContent += `${new Date().toLocaleTimeString()}  ${m}\n`; $("log").scrollTop = $("log").scrollHeight; };
+    const setStatus = (s)=>$("status").textContent = s;
+
+    // light config knobs
+    const CFG = {
+      video: { width: 640, height: 480 },
+      audio: {
+        rmsFrameMs: 100,
+        vadEnergyThreshold: 0.02,
+        bgSpeechMinBuckets: 4,
+        silentWhileSpeechMinBuckets: 8
+      },
+      vision: {
+        fps: 5,
+        lookAwayMaxYawDeg: 25,
+        mouthOpenThreshold: 0.018,
+        multiFaceMinFrames: 5,
+        lookAwayMinFrames: 10
+      },
+      focus: { minFocusLossMs: 800 }
+    };
+
+    // shared state to assemble final summary
+    const summary = {
+      started_at_iso: null,
+      duration_seconds: 0,
+      look_away_seconds: 0,
+      possible_multiple_persons_events: 0,
+      background_speech_events: 0,
+      another_voice_while_candidate_silent_events: 0,
+      focus_loss_count: 0,
+      focus_loss_ms_total: 0,
+      paste_count: 0
+    };
+
+    let running = false;
+    let startedAt = null;
+    let mediaStream = null;
+
+    $("startBtn").onclick = async ()=> {
+      try {
+        $("startBtn").disabled = true;
+        setStatus("requesting camera/mic…");
+        mediaStream = await navigator.mediaDevices.getUserMedia({ video: CFG.video, audio: true });
+        $("cam").srcObject = mediaStream;
+        await $("cam").play();
+
+        setStatus("starting vision/audio/activity…");
+        running = true;
+        startedAt = Date.now();
+        summary.started_at_iso = new Date(startedAt).toISOString();
+
+        // wire up modules
+        await startVision($("cam"), CFG.vision, (partial)=> {
+          if (partial?.visionStatus === "unavailable") {
+            const reason = partial.reason ? ` (${partial.reason})` : '';
+            log('Vision unavailable; continuing without gaze checks' + reason);
+            $("visionStats").innerHTML = `
+              <div>vision unavailable</div>
+              <div style="font-size:12px;color:#555;">MediaPipe assets could not load${reason}</div>
+            `;
+            return;
+          }
+          if (partial?.visionStatus === "degraded") {
+            const reason = partial.reason ? ` (${partial.reason})` : '';
+            log('Vision degraded: multi-person monitoring disabled' + reason);
+            $("visionStats").innerHTML = `
+              <div>vision degraded</div>
+              <div style="font-size:12px;color:#555;">multi-person monitoring disabled${reason}</div>
+            `;
+            return;
+          }
+
+          // partial: { lookAwayBumpSec?, multiFaceEvent? }
+          if (partial.lookAwayBumpSec) {
+            summary.look_away_seconds += partial.lookAwayBumpSec;
+            log('look_away_seconds +≈' + partial.lookAwayBumpSec);
+          }
+          if (partial.multiFaceEvent) {
+            summary.possible_multiple_persons_events += 1;
+            log('possible_multiple_persons: true (short burst)');
+          }
+          $("visionStats").innerHTML = `
+            <div>look_away_seconds: <b>${summary.look_away_seconds.toFixed(1)}</b></div>
+            <div>multi_person_events: <b>${summary.possible_multiple_persons_events}</b></div>
+          `;
+        });
+
+        startAudio(mediaStream, CFG.audio, () => getMouthOpenApprox(), (partial)=> {
+          // partial: { bgSpeechEvent?, anotherVoiceWhileSilentEvent?, rmsAvg? }
+          if (partial.bgSpeechEvent) {
+            summary.background_speech_events += 1;
+            log('background_speech suspected');
+          }
+          if (partial.anotherVoiceWhileSilentEvent) {
+            summary.another_voice_while_candidate_silent_events += 1;
+            log('another voice while candidate is silent suspected');
+          }
+          $("audioStats").innerHTML = `
+            <div>bg_speech_events: <b>${summary.background_speech_events}</b></div>
+            <div>other_voice_while_silent_events: <b>${summary.another_voice_while_candidate_silent_events}</b></div>
+          `;
+        });
+
+        initActivityHooks(CFG.focus, (partial)=> {
+          // partial: { focusLossMs?, paste? }
+          if (partial.focusLossMs) {
+            summary.focus_loss_count += 1;
+            summary.focus_loss_ms_total += partial.focusLossMs;
+            log(`focus_loss ${partial.focusLossMs}ms`);
+          }
+          if (partial.paste) {
+            summary.paste_count += 1;
+            log('paste event');
+          }
+          $("activityStats").innerHTML = `
+            <div>focus_loss_count: <b>${summary.focus_loss_count}</b></div>
+            <div>focus_loss_ms_total: <b>${summary.focus_loss_ms_total}</b></div>
+            <div>paste_count: <b>${summary.paste_count}</b></div>
+          `;
+        });
+
+        $("endBtn").disabled = false;
+        setStatus("running");
+        log("Interview started (local-only processing)");
+      } catch (e) {
+        console.error(e);
+        setStatus("error (see console)");
+        $("startBtn").disabled = false;
+      }
+    };
+
+    $("endBtn").onclick = async ()=> {
+      running = false;
+      setStatus("ending…");
+      await stopVision();
+      stopAudio();
+
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t=>t.stop());
+        $("cam").srcObject = null;
+      }
+
+      // pull any last-known states (not strictly required)
+      const vis = getVisionState();
+      const act = getActivityState();
+      if (vis) {
+        // already accumulated via callbacks
+      }
+      if (act) {
+        // already accumulated via callbacks
+      }
+
+      summary.duration_seconds = Math.round((Date.now() - startedAt)/1000);
+      $("summary").textContent = JSON.stringify(summary, null, 2);
+
+      resetActivity();
+      $("endBtn").disabled = true;
+      $("startBtn").disabled = false;
+      setStatus("ended");
+      log("Interview ended; summary ready.");
+    };
+  </script>
+</body>
+</html>
