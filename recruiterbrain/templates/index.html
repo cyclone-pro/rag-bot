@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Recruiter Brain</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f7f7fb;
+        --panel: #ffffff;
+        --border: #dfe1e6;
+        --accent: #4d65ff;
+        --text: #1f2933;
+        --muted: #6b7280;
+      }
+      * {
+        box-sizing: border-box;
+        font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        display: flex;
+        justify-content: center;
+        padding: 2rem 1rem;
+      }
+      .app {
+        width: min(900px, 100%);
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+      header {
+        text-align: center;
+      }
+      h1 {
+        margin: 0;
+        font-size: clamp(1.8rem, 4vw, 2.4rem);
+      }
+      p {
+        margin: 0.2rem 0 0;
+        color: var(--muted);
+      }
+      .chat-panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 1.5rem;
+        min-height: 60vh;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+      .messages {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+      .message {
+        padding: 0.9rem 1rem;
+        border-radius: 14px;
+        max-width: 80%;
+        line-height: 1.4;
+        white-space: pre-line;
+      }
+      .user {
+        align-self: flex-end;
+        background: #e5edff;
+        border: 1px solid #c7d2fe;
+      }
+      .bot {
+        align-self: flex-start;
+        background: #f4f6fb;
+        border: 1px solid var(--border);
+      }
+      form {
+        display: flex;
+        gap: 0.75rem;
+      }
+      input[type="text"] {
+        flex: 1;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0.9rem 1.2rem;
+        font-size: 1rem;
+      }
+      button {
+        background: var(--accent);
+        border: none;
+        color: #fff;
+        font-weight: 600;
+        padding: 0 1.8rem;
+        border-radius: 999px;
+        cursor: pointer;
+        transition: opacity 0.2s ease;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: wait;
+      }
+      footer {
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <h1>Recruiter Brain</h1>
+        <p>Ask natural-language questions to search and rank your candidate pool.</p>
+      </header>
+
+      <section class="chat-panel">
+        <div id="messages" class="messages">
+          <div class="message bot">
+            👋 Hi! Ask me things like “compare Milvus, dbt, AWS, Vertex AI” or “list top 10 healthcare candidates”.
+          </div>
+        </div>
+        <form id="chat-form">
+          <input id="question" type="text" placeholder="Type your question…" autocomplete="off" required />
+          <button id="send" type="submit">Send</button>
+        </form>
+      </section>
+
+      <footer>Powered by Milvus + LLM planning.</footer>
+    </main>
+
+    <script>
+      const form = document.getElementById("chat-form");
+      const input = document.getElementById("question");
+      const messages = document.getElementById("messages");
+      const sendBtn = document.getElementById("send");
+
+      function addMessage(text, role) {
+        const bubble = document.createElement("div");
+        bubble.className = `message ${role}`;
+        bubble.textContent = text;
+        messages.appendChild(bubble);
+        messages.scrollTop = messages.scrollHeight;
+      }
+
+      async function ask(question) {
+        const payload = { question };
+        try {
+          sendBtn.disabled = true;
+          const res = await fetch("/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+          }
+          const data = await res.json();
+          return data.answer || data.text || "No response.";
+        } catch (err) {
+          console.error(err);
+          return "Something went wrong. Check the server logs.";
+        } finally {
+          sendBtn.disabled = false;
+        }
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const question = input.value.trim();
+        if (!question) return;
+        input.value = "";
+        addMessage(question, "user");
+        const reply = await ask(question);
+        addMessage(reply, "bot");
+      });
+    </script>
+  </body>
+</html>
