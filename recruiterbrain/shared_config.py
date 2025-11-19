@@ -309,6 +309,7 @@ CATEGORY_SYNONYMS: Dict[str, str] = {
     "approximate nearest neighbor": "vector_database",
     "ann index": "vector_database",
     "vector search": "vector_search",
+    "Logistics": ["supply chain", "transportation", "shipping","Logistics","logistics"],
 
     # genai / llm
     "llm": "llm_provider",

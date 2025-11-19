@@ -279,38 +279,60 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
     return normalized, ctx
 
 def coverage(required_tools: List[str], normalized_tools: set[str]) -> Tuple[int, List[str], Dict[str, List[str]]]:
+    """
+    Compute how many of the required tools are covered by normalized_tools.
+
+    - Strong match: required token == tool OR substring match.
+    - Weak match: no strong match, but one of the WEAK_EQUIVALENTS is present.
+      Weak matches are returned in weak_hits and still count toward coverage.
+    """
     logger.debug("Computing coverage for required=%s", required_tools)
-    required_norm = [_norm(req) for req in required_tools]
-    covered = 0
+
+    # normalize tools once
+    norm_tools = {_norm(t) for t in normalized_tools if t}
+
+    covered_set: set[str] = set()
     missing: List[str] = []
     weak_hits: Dict[str, List[str]] = {}
+
     for req in required_tools:
-     req_norm = _norm(req)
-     if not req_norm:
-         continue
+        req_norm = _norm(req)
+        if not req_norm:
+            continue
 
-    # strong match: exact or substring match inside any normalized tool string
-     if any(req_norm == tool or req_norm in tool for tool in normalized_tools):
-         covered.add(req_norm)
-         continue
+        # ---- strong match: exact or substring match ----
+        if any(
+            req_norm == tool
+            or req_norm in tool
+            or tool in req_norm
+            for tool in norm_tools
+        ):
+            covered_set.add(req_norm)
+            continue
 
-    # synonym-based weak matches (also use substring logic)
-     if DOMAIN_SYNONYMS:
-         hits = []
-         for key, alts in DOMAIN_SYNONYMS.items():
-             if req_norm == key:
-                 for alt in alts:
-                     if any(alt == tool or alt in tool for tool in normalized_tools):
-                         hits.append(alt)
-         if hits:
-             weak_hits[req] = hits
-            # still count as "covered" but as weak
-             continue
+        # ---- weak match via WEAK_EQUIVALENTS ----
+        hits: List[str] = []
+        cousins = WEAK_EQUIVALENTS.get(req_norm) or set()
+        for cousin in cousins:
+            cousin_norm = _norm(cousin)
+            if any(
+                cousin_norm == tool
+                or cousin_norm in tool
+                or tool in cousin_norm
+                for tool in norm_tools
+            ):
+                hits.append(cousin)
 
-    missing.append(req)
+        if hits:
+            weak_hits[req] = hits
+            covered_set.add(req_norm)  # count as covered (but weak)
+            continue
 
-    return covered, missing, weak_hits
-    
+        # ---- truly missing ----
+        missing.append(req)
+
+    # tier_label expects an int
+    return len(covered_set), missing, weak_hits
 
 
 def extract_overlaps(required_tools: List[str], normalized_tools: set[str]) -> List[str]:

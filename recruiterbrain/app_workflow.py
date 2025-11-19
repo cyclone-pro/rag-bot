@@ -18,6 +18,7 @@ from recruiterbrain.shared_config import (
     get_openai_client,
 )
 from recruiterbrain.shared_utils import (
+    _norm, 
     brief_why,
     coverage,
     data_quality_check,
@@ -112,6 +113,7 @@ def _default_plan(question: str) -> Dict[str, Any]:
         intent = "count"
     else:
         intent = "list"
+    
 
     return {
         "intent": intent,
@@ -185,6 +187,12 @@ GREETING_MARKERS = [
     "good morning",
     "good afternoon",
     "good evening",
+    "How are you",
+    "How's it going",
+    "How's everything",
+    "How's everything going",
+    "How's everything going",
+
 ]
 
 SIGNATURE_MARKERS = [
@@ -358,18 +366,53 @@ def _clarifier_prompt(tools: List[str]) -> str:
     return f"Did you want an insight ranking on tools {pretty}?"
 
 
-def _tools_match_line(required: List[str], normalized_tools: set[str], weak_hits: Dict[str, List[str]]) -> str:
+def _tools_match_line(
+    required: List[str],
+    normalized_tools: set[str],
+    weak_hits: Dict[str, List[str]],
+    missing: List[str],
+) -> str:
+    """
+    Render a per-tool status line like:
+      ✅ OpenAI API, ⚠️ Airflow (~Prefect), ❌ GCP (Score: 3/4; Missing: GCP)
+    """
+    # simple local normalization so we don't depend on _norm here
+    def norm(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+    missing_norm = {norm(m) for m in missing}
+    norm_tools = {norm(t) for t in normalized_tools}
     parts: List[str] = []
+
     for tool in required:
         pretty = _prettify_tool(tool)
-        if tool in normalized_tools:
-            parts.append(f"✅ {pretty}")
+        t_norm = norm(tool)
+
+        if t_norm in missing_norm:
+            parts.append(f"❌ {pretty}")
         elif weak_hits.get(tool):
+            # weak hits are “cousins” like AWS vs Amazon Web Services, GCP vs Google Cloud Platform, etc.
             alts = "/".join(_prettify_tool(t) for t in weak_hits[tool])
             parts.append(f"⚠️ {pretty} (~{alts})")
+        elif any(
+            t_norm == nt or t_norm in nt or nt in t_norm
+            for nt in norm_tools
+        ):
+            # strong match in candidate tools
+            parts.append(f"✅ {pretty}")
         else:
+            # fallback – should be rare if missing is correctly computed
             parts.append(f"❌ {pretty}")
-    return ", ".join(parts)
+
+    total = len(required)
+    covered_count = total - len(missing)
+    score = f"{covered_count}/{total}" if total else "0/0"
+
+    if missing:
+        missing_pretty = ", ".join(_prettify_tool(m) for m in missing)
+        return f"{', '.join(parts)} (Score: {score}; Missing: {missing_pretty})"
+
+    return f"{', '.join(parts)} (Score: {score})"
 
 def _is_greeting(text: str) -> bool:
     """
@@ -850,20 +893,20 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
         why = brief_why(entity, overlaps, max_len=120)
         notes = notes_label(entry.get("rank_in_perfect"), entry["covered"], entry["missing"], entry["weak_hits"])
         percentile_value = percentiles[idx] if percentiles else 100
-        tools_line = _tools_match_line(required, entry["tools"], entry["weak_hits"])
+        tools_line = _tools_match_line(required, entry["tools"], entry["weak_hits"], entry["missing"])
         row = format_row(
-            entity,
-            percentile_value,
-            entry["covered"],
-            len(required),
-            position,
-            primary,
-            secondary,
-            why,
-            notes,
-            show_contacts,
-            candidate_name=entity.get("name"),
-            tools_match=tools_line,
+             entity,
+             percentile_value,
+             entry["covered"],
+             len(required),
+             position,
+             primary,
+             secondary,
+             why,
+             notes,
+             show_contacts,
+             candidate_name=entity.get("name"),
+             tools_match=tools_line,
         )
         evidence = evidence_snippets(entity)
         if evidence:

@@ -9,6 +9,7 @@ from pymilvus import MilvusException
 from recruiterbrain.shared_config import (
     COLLECTION,
     CORE_FIELDS,
+    DOMAIN_SYNONYMS,
     EF_SEARCH,
     EMBED_MODEL,
     FIELDS,
@@ -82,12 +83,38 @@ def post_filter(rows: Sequence[Dict[str, Any]], plan: Dict[str, Any]) -> List[Di
         filtered.append(row)
     return filtered """
 def post_filter(rows: Sequence[Dict[str, Any]], plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # --- NORMALIZE required_tools ---
+    req = plan.get("required_tools", [])
+    if isinstance(req, str):
+        # split by comma or whitespace
+        req = [t.strip().lower() for t in re.split(r"[, ]+", req) if t.strip()]
+        plan["required_tools"] = req
+
+    # --- NORMALIZE must_have_keywords ---
+    kws = plan.get("must_have_keywords", [])
+    if isinstance(kws, str):
+        kws = [k.strip().lower() for k in re.split(r"[, ]+", kws) if k.strip()]
+        plan["must_have_keywords"] = kws
     keywords = [kw.lower() for kw in plan.get("must_have_keywords", []) if kw]
+    rd = plan.get("require_domains", [])
+    if isinstance(rd, str):
+         rd = [t.strip().lower() for t in re.split(r"[, ]+", rd) if t.strip()]
+         plan["require_domains"] = rd
     require_domains = [dom.lower() for dom in plan.get("require_domains", []) if dom]
+
     networking_required = bool(plan.get("networking_required"))
 
     # Case-insensitive, whitespace-trimmed industry & stage
-    industry = (plan.get("industry_equals") or "").strip().lower()
+    ind_val = plan.get("industry_equals")
+    if isinstance(ind_val, list):
+        # pick first or join; up to you
+        if ind_val:
+            industry = ind_val[0].strip().lower()
+        else:
+            industry = ""
+    else:
+        industry = (ind_val or "").strip().lower()
+
     stage = plan.get("require_career_stage")
     stage = (stage or "").strip()
     if not stage or stage == "Any":
@@ -115,13 +142,24 @@ def post_filter(rows: Sequence[Dict[str, Any]], plan: Dict[str, Any]) -> List[Di
 
         # === Domain filter ===
         doms = str(row.get("domains_of_expertise", "")).lower()
-        if require_domains and not any(dom in doms for dom in require_domains):
-            continue
+        expanded_require_domains = set(require_domains)
+        for d in require_domains:
+            expanded_require_domains.update(
+        synonym.lower() for synonym in DOMAIN_SYNONYMS.get(d, [])
+    )
+
+        if expanded_require_domains and not any(dom in doms for dom in expanded_require_domains):
+             continue
 
         # === Keywords filter (relaxed ANY match) ===
         bag = bag_from_entity(row).lower()
+        required_tools = [t.lower() for t in plan.get("required_tools", []) if t]
+        if required_tools and not all(tool in bag for tool in required_tools):
+             continue
+
+        # === Keywords filter (relaxed ANY match) ===
         if keywords and not any(kw in bag for kw in keywords):
-            continue
+             continue
 
         # === Networking requirement ===
         if networking_required and not NETWORK_PAT.search(bag):
@@ -246,7 +284,23 @@ def ann_search(plan: Dict[str, Any]):
         logger.debug("Post-filter (no keywords) rows=%d", len(filtered))
 
     limited = filtered[:top_k]
+    if not filtered and plan.get("require_domains"):
+         logger.info(
+          "No rows after post_filter with require_domains=%s; retrying without domain constraint",
+          plan["require_domains"],
+        )
+         plan_no_dom = dict(plan)
+         plan_no_dom["require_domains"] = []
+         filtered = post_filter(merged, plan_no_dom)
+         logger.debug("Post-filter (no domains) rows=%d", len(filtered))
+
+    if not filtered and plan.get("industry_equals"):
+        logger.info(
+            "No rows after post_filter with industry_equals=%s; retrying without industry constraint",
+            plan["industry_equals"],
+        )
     return attach_sim_scores(limited, hit_list), len(filtered)
+
 
 
 """
