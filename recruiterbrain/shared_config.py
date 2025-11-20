@@ -394,6 +394,11 @@ CATEGORY_SYNONYMS: Dict[str, str] = {
     "infra_endpoint_mgmt": ["mecm", "intune", "wsus"],
     "infra_backup": ["veeam", "commvault", "netbackup"],
     "infra_config_baseline": ["mecm", "ansible"],
+
+    "healthcare": ["healthcare it", "medical", "clinical", "ehr", "fhir", "hl7"],
+    "finance": ["financial services", "capital markets", "trading", "banking", "fintech"],
+    "logistics": ["supply chain", "transportation", "shipping", "fleet", "warehousing"],
+    "education": ["edtech", "online learning", "e-learning"],
 }
 
 # Back-compat: old code may import DOMAIN_SYNONYMS; point it to categories
@@ -479,7 +484,12 @@ CATEGORY_EQUIVALENTS: Dict[str, List[str]] = {
     "infra_backup": ["veeam", "commvault", "netbackup"],
     "infra_config_baseline": ["mecm", "ansible"],
 }
-
+INDUSTRY_SYNONYMS = {
+    "Logistics": ["Supply Chain", "Transportation", "Shipping", "Delivery"],
+    "Healthcare": ["Healthcare IT", "Medical", "Clinical"],
+    "Finance": ["Financial Services", "Capital Markets", "Banking"],
+    "Education": ["EdTech", "E-Learning"],
+}
 # 4) Near-miss cousins (do not count for strict 4/4; show in Notes)
 WEAK_EQUIVALENTS: Dict[str, Set[str]] = {
     "milvus": {"faiss", "annoy", "hnswlib"},           # ANN libs ≠ managed vector DB
@@ -635,6 +645,7 @@ __all__ = [
     "BRAND_ALIASES",
     "CATEGORY_SYNONYMS",
     "CATEGORY_EQUIVALENTS",
+    "INDUSTRY_SYNONYMS",
     "WEAK_EQUIVALENTS",
     "ALIAS_MAP",          # back-compat alias -> BRAND_ALIASES
     "DOMAIN_SYNONYMS",    # back-compat alias -> CATEGORY_SYNONYMS

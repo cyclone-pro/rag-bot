@@ -152,6 +152,74 @@ CONTACT_TRIGGERS = ["give their info", "linkedin", "gmail", "email", "contact"]
 
 LAST_INSIGHT_RESULT: Optional[Dict[str, Any]] = None
 
+STAGE_RANK = {
+    "Entry": 1,
+    "Mid": 2,
+    "Senior": 3,
+    "Lead/Manager": 4,
+    "Director+": 5,
+}
+
+def _infer_stage_from_years_text(text: str) -> str | None:
+    """
+    Parse phrases like:
+      '2 years', '3-5 years', 'at least 5 years', '5+ years', 'minimum of 5 yrs'
+    and map to Entry / Mid / Senior.
+    """
+    q = text.lower()
+
+    # patterns: 5+ years, 5+ yrs, 5 plus years
+    m = re.search(r"(\d+)\s*\+\s*(?:years|yrs|yr)", q)
+    if m:
+        years = int(m.group(1))
+        return _stage_for_years(years)
+
+    # at least 5 years, minimum of 5 years, min 5 years
+    m = re.search(r"(?:at\s+least|min(?:imum)?\s+of|min)\s+(\d+)\s*(?:years|yrs|yr)", q)
+    if m:
+        years = int(m.group(1))
+        return _stage_for_years(years)
+
+    # range: 3-5 years
+    m = re.search(r"(\d+)\s*-\s*(\d+)\s*(?:years|yrs|yr)", q)
+    if m:
+        low = int(m.group(1))
+        high = int(m.group(2))
+        # use the lower bound as requirement
+        return _stage_for_years(low)
+
+    # fallback: plain '5 years'
+    m = re.search(r"(\d+)\s*(?:years|yrs|yr)", q)
+    if m:
+        years = int(m.group(1))
+        return _stage_for_years(years)
+
+    return None
+
+def _stage_for_years(years: int) -> str:
+    """
+    Map years to Entry / Mid / Senior based on your bands:
+      - 0–3 -> Entry
+      - >3–5 -> Mid
+      - >5   -> Senior
+    """
+    if years <= 3:
+        return "Entry"
+    if years <= 5:
+        return "Mid"
+    return "Senior"
+
+def _better_stage(current: str | None, candidate: str | None) -> str | None:
+    """Pick the stricter stage between current and candidate based on STAGE_RANK."""
+    if not candidate:
+        return current
+    if not current or current == "Any":
+        return candidate
+    cur_rank = STAGE_RANK.get(current, 0)
+    cand_rank = STAGE_RANK.get(candidate, 0)
+    return candidate if cand_rank > cur_rank else current
+
+
 # For stripping out contact/meta phrases before we create embeddings or keyword filters
 def strip_contact_meta_phrases(text: str) -> str:
     if not text:
@@ -575,22 +643,35 @@ def llm_plan(question: str) -> Dict[str, Any]:
         plan = _default_plan(question)
     else:
         system_prompt = (
-            "You parse recruiting analytics questions into a JSON plan for Milvus retrieval over a resume collection. "
-            "Never add fields not in schema. Output ONLY JSON. Keys:\n"
-            "{\n"
-            '  "intent": "count|list|why",\n'
-            '  "vector_field": "summary_embedding|skills_embedding",\n'
-            '  "must_have_keywords": ["keyword", ...],\n'
-            '  "industry_equals": "string or null",\n'
-            '  "require_domains": ["Healthcare IT","Construction","CAD","NLP","GenAI", ...],\n'
-            '  "require_career_stage": "Entry|Mid|Senior|Lead/Manager|Director+|Any",\n'
-            '  "networking_required": true|false,\n'
-            '  "top_k": 1000,\n'
-            '  "return_top": 20\n'
-            "}\n"
-            "If the user asks for 'total how many', set intent='count'. If they want names, 'list'. "
-            "If they want a brief justification, 'why'. Use 'summary_embedding' by default."
-        )
+    "You parse recruiting and sourcing questions into a JSON plan for Milvus retrieval over a resume collection. "
+    "Never add fields not in this schema. Output ONLY JSON (no prose). Keys:\n"
+    "{\n"
+    '  "intent": "count|list|why",\n'
+    '  "vector_field": "summary_embedding|skills_embedding",\n'
+    '  "must_have_keywords": ["keyword", ...],\n'
+    '  "industry_equals": "string or null",\n'
+    '  "require_domains": ["Healthcare IT","Construction","CAD","NLP","GenAI", ...],\n'
+    '  "require_career_stage": "Entry|Mid|Senior|Lead/Manager|Director+|Any",\n'
+    '  "networking_required": true|false,\n'
+    '  "top_k": 1000,\n'
+    '  "return_top": 20\n'
+    "}\n"
+    "INTERPRET YEARS OF EXPERIENCE AS CAREER STAGE USING THESE RULES:\n"
+    "- 0–3 years, or phrases like 'junior', 'entry level', 'new grad', 'fresher' -> require_career_stage = 'Entry'.\n"
+    "- 3–5 years, or phrases like 'mid level', 'intermediate' -> require_career_stage = 'Mid'.\n"
+    "- 5+ years, or phrases like 'senior', '8+ years', '10 years', 'principal', 'staff', "
+    "  or any explicit 'minimum of 5 years' -> require_career_stage = 'Senior'.\n"
+    "- If the user explicitly asks for a management level (e.g. 'team lead', 'engineering manager', "
+    "  'director'), use 'Lead/Manager' or 'Director+' instead of 'Senior'.\n"
+    "- If the question does NOT clearly specify experience or level, set require_career_stage = 'Any'.\n"
+    "OTHER RULES:\n"
+    "- If the user asks for 'total how many', set intent = 'count'.\n"
+    "- If they want a list of candidates, set intent = 'list'.\n"
+    "- If they want an explanation or justification ('why', 'explain'), set intent = 'why'.\n"
+    "- Use 'summary_embedding' by default for vector_field.\n"
+    "- Only include 'industry_equals' or 'require_domains' when the question clearly specifies an industry or domain.\n"
+)
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Question: {question}"},

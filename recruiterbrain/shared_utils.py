@@ -205,48 +205,7 @@ def _gather_text_fields(entity: Dict[str, Any], keys: List[str]) -> List[str]:
             values.extend([str(item) for item in value if item])
     return values
 
-"""
-def normalize_tools(entity: Dict[str, Any]) -> Tuple[set[str], Dict[str, bool]]:
-    logger.debug("Normalizing tools for candidate_id=%s", entity.get("candidate_id"))
-    raw = _gather_text_fields(
-        entity,
-        [
-            "tools_and_technologies",
-            "skills_extracted",
-            "domains_of_expertise",
-            "evidence_tools",
-        ],
-    )
-    normalized = set()
-    raw_lower = [_norm(token) for token in raw if token]
-    corpus = " ".join(
-        _gather_text_fields(
-            entity,
-            ["employment_history", "semantic_summary", "keywords_summary"],
-        )
-    )
-    corpus_norm = _norm(corpus)
-    context_flags = {
-        "vector_context": any(
-            needle in corpus_norm
-            for needle in [
-                "embedding",
-                "hnsw",
-                "ann",
-                "approximate nearest",
-                "vector search",
-                "vector database",
-            ]
-        )
-    }
-    for token in raw_lower:
-        mapped = ALIAS_MAP.get(token, token)
-        if mapped in DOMAIN_SYNONYMS and context_flags["vector_context"]:
-            mapped = DOMAIN_SYNONYMS[mapped]
-        normalized.add(mapped)
-    return normalized, context_flags
 
-"""
 def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
     text_fields = _gather_text_fields(
         entity,
