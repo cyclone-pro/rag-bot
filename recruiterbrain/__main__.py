@@ -13,8 +13,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from fastapi.templating import Jinja2Templates
 
+from recruiterbrain.env_loader import load_env
 from recruiterbrain.logging_config import configure_logging
 
+load_env()
 configure_logging()
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ app.add_middleware(
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=4000)
+    question: str = Field(..., min_length=1, max_length=12000)
     required_tools: Optional[List[str]] = None
     filters: Optional[Dict[str, Any]] = None
     show_contacts: bool = False
@@ -61,7 +63,7 @@ class ChatResponse(BaseModel):
 
 
 class InsightRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=4000)
+    question: str = Field(..., min_length=1, max_length=12000)
     required_tools: Optional[List[str]] = None
     filters: Optional[Dict[str, Any]] = None
     show_contacts: bool = False

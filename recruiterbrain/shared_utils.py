@@ -8,7 +8,10 @@ import math
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from recruiterbrain.env_loader import load_env
 from recruiterbrain.shared_config import ALIAS_MAP, DOMAIN_SYNONYMS, WEAK_EQUIVALENTS
+
+load_env()
 
 logger = logging.getLogger(__name__)
 
@@ -353,7 +356,21 @@ def notes_label(
     missing: List[str],
     weak_hits: Dict[str, List[str]],
 ) -> str:
-    if covered >= 4:
+    """
+    Improved JD match interpretation with stable percentile buckets.
+    Uses ratio + absolute coverage threshold to avoid false 'perfect' matches.
+    """
+    total = covered + len(missing)
+    if total <= 0:
+        return "partial match"
+
+    ratio = covered / total
+
+    # *** PERFECT MATCH ***
+    # Require BOTH:
+    # - high coverage %
+    # - AND at least 6 strong hits (avoids '4/5 perfect' for tiny subsets)
+    if ratio >= 0.80 and covered >= 6:
         if perfect_index == 0:
             return "perfect match"
         if perfect_index == 1:
@@ -361,33 +378,57 @@ def notes_label(
         if perfect_index == 2:
             return "3rd best perfect match"
         return "perfect match"
-    if covered == 3:
+
+    # *** GOOD MATCH ***
+    if ratio >= 0.60:
         base = "good match"
         if missing:
-            base = f"good match (missing {missing[0]})"
+            base += f" (missing {missing[0]})"
         return _append_near_miss(base, weak_hits)
-    if covered == 2:
-        miss = " & ".join(missing[:2])
+
+    # *** ACCEPTABLE MATCH ***
+    if ratio >= 0.40:
+        miss = ", ".join(missing[:2]) if missing else ""
         base = f"acceptable (missing {miss})" if miss else "acceptable"
         return _append_near_miss(base, weak_hits)
+
+    # *** PARTIAL MATCH ***
     base = "partial match"
     return _append_near_miss(base, weak_hits)
 
 
-def brief_why(entity: Dict[str, Any], overlaps: List[str], max_len: int = 120) -> str:
+def brief_why(
+    entity: Dict[str, Any],
+    overlaps: List[str],
+    max_len: int = 120,
+    max_words: int = 20,
+) -> str:
     summary = (entity.get("semantic_summary") or "").strip()
     if not summary:
         if overlaps:
             summary = "Strong overlap in " + ", ".join(overlaps[:3])
         else:
-            title = extract_latest_title(entity.get("employment_history"), entity.get("top_titles_mentioned"))
-            primary, _ = select_industries(entity.get("primary_industry"), entity.get("sub_industries"))
+            title = extract_latest_title(
+                entity.get("employment_history"),
+                entity.get("top_titles_mentioned"),
+            )
+            primary, _ = select_industries(
+                entity.get("primary_industry"),
+                entity.get("sub_industries"),
+            )
             summary = "Relevant background in " + (primary or "industry")
             if title:
                 summary += f" + {title}"
+
     summary = summary.strip()
-    if len(summary) > max_len:
+
+    # First enforce word count ~15–20 words
+    words = summary.split()
+    if len(words) > max_words:
+        summary = " ".join(words[:max_words]) + "…"
+    elif len(summary) > max_len:
         summary = summary[: max_len - 1] + "…"
+
     return summary
 
 
@@ -445,7 +486,12 @@ def format_row(
     sec = f", {secondary}" if secondary else ""
     pos = position or "-"
     header = f"{name} ({percentile}th percentile, {pos}, {primary or ''}{sec})"
-    match_chip = "match: in" if covered >= 4 else f"match: out ({covered}/{required_total})"
+    if required_total > 0:
+         pct = round(covered / required_total * 100)
+    else:
+         pct = 0
+    match_chip = f"{covered}/{required_total} skills match ({pct}%)"
+
     payload: Dict[str, Any] = {
         "title_line": header,
         "match_chip": match_chip,

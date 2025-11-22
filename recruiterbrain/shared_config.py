@@ -9,10 +9,10 @@ from typing import Any, Dict, Final, List, Optional, Set  # added Any, Set
 
 import json
 
-from dotenv import load_dotenv
 from pymilvus import MilvusClient
 from sentence_transformers import SentenceTransformer
 
+from recruiterbrain.env_loader import load_env, loaded_env_paths
 from recruiterbrain.logging_config import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -24,16 +24,10 @@ except Exception:  # pragma: no cover - OpenAI is optional during local dev
     OpenAI = None  # type: ignore
 
 # ------------------------- .env discovery & load --------------------------- #
-BASE_DIR = Path(__file__).resolve().parent
-env_candidates: List[Path] = []
-rb_env_path = os.environ.get("RB_ENV_PATH")
-if rb_env_path:
-    env_candidates.append(Path(rb_env_path))
-env_candidates.extend([BASE_DIR.parent / ".env", BASE_DIR / ".env"])
-for env_path in env_candidates:
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path, override=False)
-        logger.debug("Loaded environment variables from %s", env_path)
+for env_path in load_env():
+    logger.debug("Loaded environment variables from %s", env_path)
+if not loaded_env_paths():
+    logger.debug("No .env file found; relying on existing environment.")
 
 # ------------------------- Environment + constants ------------------------- #
 MILVUS_URI: Optional[str] = os.environ.get("MILVUS_URI")
@@ -294,6 +288,15 @@ BRAND_ALIASES: Dict[str, str] = {
     "shell scripting": "bash",
     "chocolatey": "chocolatey",
     "ansible tower": "ansible",
+    "ospf": ["ospf"],
+    "bgp": ["bgp", "eigrp", "isis", "pim multicast"],
+    "mpls": ["mpls", "sr-te"],
+    "vxlan": ["vxlan", "bgp-mp", "vrf", "vrfs"],
+    "vmware": ["vmware", "esxi", "vsphere"],
+    "linux": ["linux"],
+    "windows": ["windows server", "windows"],
+    "arista": ["arista os"],
+    "cisco ios": ["cisco ios"],
 }
 
 # Back-compat: keep old name for existing imports/usages

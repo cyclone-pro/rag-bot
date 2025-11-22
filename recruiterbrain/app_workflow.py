@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 import re  
+from recruiterbrain.env_loader import load_env
 from recruiterbrain.core_retrieval import ann_search
 from recruiterbrain.shared_config import (
     INSIGHT_DEFAULT_K,
@@ -34,6 +35,8 @@ from recruiterbrain.shared_utils import (
     select_industries,
     tier_label,
 )
+
+load_env()
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,56 @@ JD_TOOL_HINTS = {
     "vertex ai": ["vertex ai"],
 }
 
+JD_START_PATTERNS = [
+    r"\btitle\s*:",               # Title: Python with Gen AI...
+    r"\bjd\s*:",                  # JD:
+    r"\bjob\s+description\b",     # Job Description
+    r"\bmandatory\s+skills\s*:",  # Mandatory Skills :
+    r"\brequirement\s*:",         # Requirement:
+]
+
+JD_END_PATTERNS = [
+    r"\bplease note\b",
+    r"\bregards\b",
+    r"\bbest regards\b",
+    r"\bthanks\b",
+    r"\bthank you\b",
+]
+
+
+def extract_jd_block(text: str) -> str:
+    """
+    Given a long recruiter email, extract the JD-ish block:
+    from Title/JD/Mandatory Skills onward, and stop at Regards/Please Note/etc.
+    If we can't find markers, return the original text.
+    """
+    if not text:
+        return ""
+
+    full = text.strip()
+    lower = full.lower()
+
+    # --- Find JD start ---
+    start_idx = None
+    for pat in JD_START_PATTERNS:
+        m = re.search(pat, lower)
+        if m:
+            if start_idx is None or m.start() < start_idx:
+                start_idx = m.start()
+
+    if start_idx is None:
+        # No clear JD marker; just use the whole text.
+        start_idx = 0
+
+    # --- Find JD end (optional) ---
+    end_idx = len(full)
+    for pat in JD_END_PATTERNS:
+        m = re.search(pat, lower)
+        if m and m.start() > start_idx:
+            end_idx = min(end_idx, m.start())
+
+    jd_block = full[start_idx:end_idx].strip()
+    return jd_block or full
 
 def extract_tools_from_jd(jd_text: str) -> List[str]:
     """
@@ -104,6 +157,46 @@ def extract_tools_from_jd(jd_text: str) -> List[str]:
             seen.add(t)
             unique.append(t)
     return unique
+
+def canonicalize_jd_tools(plan: Dict[str, Any]) -> None:
+    """
+    Normalize the JD tools list so that scoring is stable across runs and phrasings.
+    - use union of must_have_keywords and required_tools
+    - lowercase
+    - strip
+    - deduplicate
+    - sort
+    Only applies when _jd_mode is True.
+    """
+    if not plan.get("_jd_mode"):
+        return
+
+    raw_tools: List[str] = []
+
+    req = plan.get("required_tools") or []
+    if isinstance(req, str):
+        req = [t.strip() for t in req.split(",") if t.strip()]
+    raw_tools.extend(req)
+
+    kws = plan.get("must_have_keywords") or []
+    if isinstance(kws, str):
+        kws = [k.strip() for k in kws.split(",") if k.strip()]
+    raw_tools.extend(kws)
+
+    canonical: List[str] = []
+    seen = set()
+
+    for t in raw_tools:
+        norm = t.strip().lower()
+        if not norm:
+            continue
+        if norm in seen:
+            continue
+        seen.add(norm)
+        canonical.append(norm)
+
+    canonical.sort()
+    plan["required_tools"] = canonical
 
 def _default_plan(question: str) -> Dict[str, Any]:
     q = (question or "").lower()
@@ -436,51 +529,61 @@ def _clarifier_prompt(tools: List[str]) -> str:
 
 def _tools_match_line(
     required: List[str],
-    normalized_tools: set[str],
+    normalized_tools: Sequence[str],
     weak_hits: Dict[str, List[str]],
-    missing: List[str],
+    missing: Sequence[str],
+    total: int,
 ) -> str:
     """
-    Render a per-tool status line like:
-      ✅ OpenAI API, ⚠️ Airflow (~Prefect), ❌ GCP (Score: 3/4; Missing: GCP)
-    """
-    # simple local normalization so we don't depend on _norm here
-    def norm(text: str) -> str:
-        return re.sub(r"\s+", " ", (text or "").strip().lower())
+    Render per-tool icons PLUS an aggregate score/percent and missing tools summary.
 
-    missing_norm = {norm(m) for m in missing}
-    norm_tools = {norm(t) for t in normalized_tools}
+    required: canonical JD / query tools (lowercase).
+    normalized_tools: normalized tools set from normalize_tools(...).
+    weak_hits: mapping from required -> list of weak equivalents.
+    missing: list of required skills not covered (from coverage()).
+    total: total number of JD tools (len(required)).
+    """
     parts: List[str] = []
 
-    for tool in required:
-        pretty = _prettify_tool(tool)
-        t_norm = norm(tool)
+    norm_set = {t.lower().strip() for t in normalized_tools}
+    missing_set = {m.lower().strip() for m in (missing or [])}
 
-        if t_norm in missing_norm:
+    # --- Score & percent purely from coverage() output ---
+    total_skills = total or len(required) or 1
+    missing_pretty = [_prettify_tool(m) for m in missing]
+    covered = total_skills - len(missing_pretty)
+    pct = round(covered / total_skills * 100)
+
+    # --- Per-tool icons aligned with the same notion of "missing" ---
+    for token in required:
+        key = token.lower().strip()
+        pretty = _prettify_tool(token)
+
+        if key in missing_set:
+            # Coverage says this JD skill is not satisfied
             parts.append(f"❌ {pretty}")
-        elif weak_hits.get(tool):
-            # weak hits are “cousins” like AWS vs Amazon Web Services, GCP vs Google Cloud Platform, etc.
-            alts = "/".join(_prettify_tool(t) for t in weak_hits[tool])
-            parts.append(f"⚠️ {pretty} (~{alts})")
-        elif any(
-            t_norm == nt or t_norm in nt or nt in t_norm
-            for nt in norm_tools
-        ):
-            # strong match in candidate tools
+            continue
+
+        # Not in missing -> coverage says it IS satisfied (strong or weak)
+        if key in norm_set:
             parts.append(f"✅ {pretty}")
+        elif weak_hits.get(token):
+            alts = "/".join(_prettify_tool(t) for t in weak_hits[token])
+            parts.append(f"⚠️ {pretty} (~{alts})")
         else:
-            # fallback – should be rare if missing is correctly computed
-            parts.append(f"❌ {pretty}")
+            # Coverage says present but we don't see the exact token – still treat as hit
+            parts.append(f"✅ {pretty}")
 
-    total = len(required)
-    covered_count = total - len(missing)
-    score = f"{covered_count}/{total}" if total else "0/0"
+    suffix = f" (Score: {covered}/{total_skills}; {pct}% match"
+    if missing_pretty:
+        truncated_missing = ", ".join(missing_pretty[:4])
+        if len(missing_pretty) > 4:
+            truncated_missing += ", …"
+        suffix += f"; Missing: {truncated_missing}"
+    suffix += ")"
 
-    if missing:
-        missing_pretty = ", ".join(_prettify_tool(m) for m in missing)
-        return f"{', '.join(parts)} (Score: {score}; Missing: {missing_pretty})"
+    return ", ".join(parts) + suffix
 
-    return f"{', '.join(parts)} (Score: {score})"
 
 def _is_greeting(text: str) -> bool:
     """
@@ -638,56 +741,73 @@ def llm_plan(question: str) -> Dict[str, Any]:
 
     plan: Dict[str, Any]
 
+    original = (question or "").strip()
+
+    # --- JD detection using your heuristic ---
+    jd_mode = is_jd_mode(original)
+
+    if jd_mode:
+        # Clean the JD email down to just the JD-ish body
+        cleaned_jd = clean_jd_text(original)
+        semantic_jd = build_jd_semantic_query(cleaned_jd)
+        planner_question = semantic_jd
+    else:
+        # For non-JD, just strip obvious contact/meta noise
+        cleaned_for_plan = strip_contact_meta_phrases(original)
+        planner_question = cleaned_for_plan
+        cleaned_jd = ""
+        semantic_jd = ""
+
     if not client:
         logger.debug("LLM planner unavailable; using default plan")
-        plan = _default_plan(question)
+        plan = _default_plan(planner_question)
     else:
         system_prompt = (
-    "You parse recruiting and sourcing questions into a JSON plan for Milvus retrieval over a resume collection. "
-    "Never add fields not in this schema. Output ONLY JSON (no prose). Keys:\n"
-    "{\n"
-    '  "intent": "count|list|why",\n'
-    '  "vector_field": "summary_embedding|skills_embedding",\n'
-    '  "must_have_keywords": ["keyword", ...],\n'
-    '  "industry_equals": "string or null",\n'
-    '  "require_domains": ["Healthcare IT","Construction","CAD","NLP","GenAI", ...],\n'
-    '  "require_career_stage": "Entry|Mid|Senior|Lead/Manager|Director+|Any",\n'
-    '  "networking_required": true|false,\n'
-    '  "top_k": 1000,\n'
-    '  "return_top": 20\n'
-    "}\n"
-    "INTERPRET YEARS OF EXPERIENCE AS CAREER STAGE USING THESE RULES:\n"
-    "- 0–3 years, or phrases like 'junior', 'entry level', 'new grad', 'fresher' -> require_career_stage = 'Entry'.\n"
-    "- 3–5 years, or phrases like 'mid level', 'intermediate' -> require_career_stage = 'Mid'.\n"
-    "- 5+ years, or phrases like 'senior', '8+ years', '10 years', 'principal', 'staff', "
-    "  or any explicit 'minimum of 5 years' -> require_career_stage = 'Senior'.\n"
-    "- If the user explicitly asks for a management level (e.g. 'team lead', 'engineering manager', "
-    "  'director'), use 'Lead/Manager' or 'Director+' instead of 'Senior'.\n"
-    "- If the question does NOT clearly specify experience or level, set require_career_stage = 'Any'.\n"
-    "OTHER RULES:\n"
-    "- If the user asks for 'total how many', set intent = 'count'.\n"
-    "- If they want a list of candidates, set intent = 'list'.\n"
-    "- If they want an explanation or justification ('why', 'explain'), set intent = 'why'.\n"
-    "- Use 'summary_embedding' by default for vector_field.\n"
-    "- Only include 'industry_equals' or 'require_domains' when the question clearly specifies an industry or domain.\n"
-)
+            "You parse recruiting and sourcing questions into a JSON plan for Milvus retrieval over a resume collection. "
+            "Never add fields not in this schema. Output ONLY JSON (no prose). Keys:\n"
+            "{\n"
+            '  "intent": "count|list|why",\n'
+            '  "vector_field": "summary_embedding|skills_embedding",\n'
+            '  "must_have_keywords": ["keyword", ...],\n'
+            '  "industry_equals": "string or null",\n'
+            '  "require_domains": ["Healthcare IT","Construction","CAD","NLP","GenAI", ...],\n'
+            '  "require_career_stage": "Entry|Mid|Senior|Lead/Manager|Director+|Any",\n'
+            '  "networking_required": true|false,\n'
+            '  "top_k": 1000,\n'
+            '  "return_top": 20\n'
+            "}\n"
+            "INTERPRET YEARS OF EXPERIENCE AS CAREER STAGE USING THESE RULES:\n"
+            "- 0–3 years, or phrases like 'junior', 'entry level', 'new grad', 'fresher' -> require_career_stage = 'Entry'.\n"
+            "- 3–5 years, or phrases like 'mid level', 'intermediate' -> require_career_stage = 'Mid'.\n"
+            "- 5+ years, or phrases like 'senior', '8+ years', '10 years', 'principal', 'staff', "
+            "  or any explicit 'minimum of 5 years' -> require_career_stage = 'Senior'.\n"
+            "- If the user explicitly asks for a management level (e.g. 'team lead', 'engineering manager', "
+            "  'director'), use 'Lead/Manager' or 'Director+' instead of 'Senior'.\n"
+            "- If the question does NOT clearly specify experience or level, set require_career_stage = 'Any'.\n"
+            "OTHER RULES:\n"
+            "- If the user asks for 'total how many', set intent = 'count'.\n"
+            "- If they want a list of candidates, set intent = 'list'.\n"
+            "- If they want an explanation or justification ('why', 'explain'), set intent = 'why'.\n"
+            "- Use 'summary_embedding' by default for vector_field.\n"
+            "- Only include 'industry_equals' or 'require_domains' when the question clearly specifies an industry or domain.\n"
+        )
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Question: {question}"},
+            {"role": "user", "content": f"Question: {planner_question}"},
         ]
 
         try:
             resp = client.chat.completions.create(
                 model=OPENAI_MODEL,
-                temperature=0.1,
+                temperature=0.0,  # deterministic planner
                 messages=messages,
             )
             raw = resp.choices[0].message.content.strip()
             plan = json.loads(raw)
         except Exception as exc:
             logger.warning("LLM planner failed, falling back to heuristic: %s", exc)
-            plan = _default_plan(question)
+            plan = _default_plan(planner_question)
 
     # --- Normalize + defaults ---
     plan = plan or {}
@@ -699,33 +819,72 @@ def llm_plan(question: str) -> Dict[str, Any]:
     plan.setdefault("require_domains", [])
     plan.setdefault("require_career_stage", "Any")
     plan.setdefault("networking_required", False)
-    plan["question"] = question
 
-    # --- NEW: heuristic industry inference (e.g. 'healthcare candidates') ---
-    _infer_industry_equals(question, plan)
+    # Original raw question stays here for logging / explanations
+    plan["question"] = original
+
+    # --- Heuristic industry inference based on the original question ---
+    _infer_industry_equals(original, plan)
     plan["industry_equals"] = canonicalize_industry(plan.get("industry_equals"))
 
-
-    # --- Insight routing ---
-    is_insight, router_conf = _route_insight(question)
+    # --- Insight routing based on original question ---
+    is_insight, router_conf = _route_insight(original)
     if is_insight:
         plan["intent"] = "insight"
         plan["k"] = int(plan.get("k") or INSIGHT_DEFAULT_K)
         logger.info("Router promoted question to insight intent (confidence=%.2f)", router_conf)
     plan["_router_confidence"] = router_conf
 
-    # --- Required tools derivation ---
+    # --- Required tools from LLM plan ---
     normalized_tools = _derive_required_tools(plan)
-    plan["required_tools"] = normalized_tools
+
+    if jd_mode:
+        # Flag JD mode
+        plan["_jd_mode"] = True
+        plan["_jd_raw"] = cleaned_jd
+
+        # This is what will be embedded for ANN
+        plan["embedding_query"] = semantic_jd or cleaned_jd or original
+
+        # Extract tools from JD using your heuristic hints
+        jd_tools = extract_tools_from_jd(cleaned_jd)
+
+        # Merge: LLM tools + JD heuristic tools + must_have_keywords
+        merged: List[str] = []
+        seen = set()
+
+        for lst in (normalized_tools, jd_tools, plan.get("must_have_keywords") or []):
+            if isinstance(lst, str):
+                lst = [lst]
+            for t in lst:
+                norm = str(t).strip().lower()
+                if not norm or norm in seen:
+                    continue
+                seen.add(norm)
+                merged.append(norm)
+
+        merged.sort()
+        plan["required_tools"] = merged
+
+        # For JD flows, make sure it's insight with a sane top N
+        plan["intent"] = "insight"
+        if "return_top" not in plan:
+            plan["return_top"] = 10
+        plan["k"] = int(plan.get("k") or plan["return_top"])
+    else:
+        # Non-JD: use the LLM-derived tools, and clean embedding_query for ANN
+        cleaned_for_embed = strip_contact_meta_phrases(original)
+        plan["embedding_query"] = cleaned_for_embed or original
+        plan["required_tools"] = normalized_tools
 
     # If lots of tools, treat as insight even if LLM didn't say so.
-    if plan.get("intent") != "insight" and len(normalized_tools) >= 3:
+    if plan.get("intent") != "insight" and len(plan.get("required_tools") or []) >= 3:
         plan["intent"] = "insight"
         plan["k"] = int(plan.get("k") or INSIGHT_DEFAULT_K)
         router_conf = max(router_conf, ROUTER_CONFIDENCE_THRESHOLD + 0.05)
         plan["_router_confidence"] = router_conf
 
-    # --- Clarifier for low-confidence insight ---
+    # Clarifier for low-confidence insight
     if plan.get("intent") == "insight":
         plan["k"] = int(plan.get("k") or INSIGHT_DEFAULT_K)
         if router_conf < ROUTER_CONFIDENCE_THRESHOLD:
@@ -733,8 +892,7 @@ def llm_plan(question: str) -> Dict[str, Any]:
                 "Router confidence %.2f below threshold; requesting clarification",
                 router_conf,
             )
-            plan["clarify"] = _clarifier_prompt(normalized_tools)
-            return plan
+            plan["clarify"] = _clarifier_prompt(plan.get("required_tools") or [])
 
     return plan
 
@@ -765,10 +923,12 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
 
     if _is_greeting(original_question):
         # Short friendly intro instead of hammering Milvus
-        return 'Hey John how can i help you with! Ask me things like "compare Milvus, dbt, AWS, Vertex AI" or "list top 10 healthcare candidates".'
+        return (
+            'Hey John how can i help you with! Ask me things like '
+            '"compare Milvus, dbt, AWS, Vertex AI" or "list top 10 healthcare candidates".'
+        )
 
     # --- Build or reuse a plan (LLM planner) ---
-    # For override, we respect the caller's plan but still sanitize later.
     if plan_override is not None:
         plan = dict(plan_override)
     else:
@@ -779,37 +939,76 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     if not isinstance(plan, dict):
         return str(plan)
 
-    # --- JD detection & embedding_query construction (RULE #2, RULE #9, RULE #10) ---
+    # -------------------------------
+    # JD detection & embedding_query
+    # -------------------------------
     jd_mode = is_jd_mode(original_question)
     plan["_jd_mode"] = jd_mode
 
     if jd_mode:
+        # 1) Clean the JD text (strip greetings/signature/boilerplate)
         cleaned_jd = clean_jd_text(original_question)
+
+        # 2) Build compact semantic query (first ~500 chars)
         semantic_query = build_jd_semantic_query(cleaned_jd)
         plan["_jd_raw"] = cleaned_jd
-        # This is what will be embedded
         plan["embedding_query"] = semantic_query
-        # Also make sure 'question' is this compact semantic JD string,
-        # so any downstream uses of question stay relatively clean.
         plan["question"] = semantic_query
-        # sensible defaults for JD flow
+
+        # 3) Sensible defaults for JD flow
         plan.setdefault("intent", "insight")
         plan.setdefault("vector_field", VECTOR_FIELD_DEFAULT)
         plan.setdefault("top_k", TOP_K)
         plan.setdefault("return_top", RETURN_TOP)
-            # ✅ Derive required tools from the JD text
-        jd_tools = extract_tools_from_jd(cleaned_jd)
-        if jd_tools:
-          plan["required_tools"] = jd_tools
 
+        # 4) Derive required tools from the JD text and merge with any planner tools
+        jd_tools = extract_tools_from_jd(cleaned_jd)  # e.g. ["python", "mlops", "pytorch", ...]
+        if jd_tools:
+            existing = [t for t in plan.get("required_tools", []) if t]
+            merged: List[str] = []
+            seen = set()
+            for t in list(existing) + list(jd_tools):
+                t_norm = t.strip().lower()
+                if t_norm and t_norm not in seen:
+                    seen.add(t_norm)
+                    merged.append(t_norm)
+            plan["required_tools"] = merged
     else:
-        # Normal mode: remove contact/meta words BEFORE embedding.
+        # Normal question: remove contact/meta words BEFORE embedding.
         cleaned_for_embed = strip_contact_meta_phrases(original_question)
         plan["embedding_query"] = cleaned_for_embed
         plan["question"] = cleaned_for_embed
-    
+
+    # Heuristic booster (years-of-exp -> stage, etc.)
     _augment_plan_with_heuristics(original_question, plan)
-   # --- Remove contact terms from filters as well (RULE #1 & #7) ---
+
+    # --- Respect explicit "N candidates" / "top N" in the question ---
+    text_lower = (original_question or "").lower()
+    explicit_n: Optional[int] = None
+
+    # Patterns like "top 10" or "10 django candidates"
+    m = re.search(r"\btop\s+(\d+)\b", text_lower)
+    if not m:
+        m = re.search(r"\b(\d+)\s+(?:[a-z]+\s+)?(candidates|profiles|people)\b", text_lower)
+
+    if m:
+        try:
+            explicit_n = max(1, min(int(m.group(1)), 50))
+        except ValueError:
+            explicit_n = None
+
+    if explicit_n is not None:
+        plan["return_top"] = explicit_n
+        if (plan.get("intent") or "").lower() == "insight":
+            plan["k"] = max(int(plan.get("k") or 0), explicit_n)
+    elif plan.get("_jd_mode"):
+        # Long JD emails with no explicit count -> default top 10
+        current = int(plan.get("return_top") or RETURN_TOP)
+        plan["return_top"] = min(current, 10)
+        if (plan.get("intent") or "").lower() == "insight":
+            plan["k"] = max(int(plan.get("k") or 0), plan["return_top"])
+
+    # --- Remove contact terms from filters as well (RULE #1 & #7) ---
     contact_set = {c.lower() for c in CONTACT_PHRASES}
 
     def _clean_keyword_list(values: Any) -> List[str]:
@@ -832,32 +1031,16 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
             len(fallback or ""),
         )
 
-    # --- Core retrieval ---
-        # --- LAST-RESORT SAFETY: ensure embedding_query/question are set ---
-    embed_text = plan.get("embedding_query") or plan.get("question")
-    if not embed_text:
-        cleaned_for_embed = strip_contact_meta_phrases(original_question)
-        fallback = cleaned_for_embed or original_question
-        plan["embedding_query"] = fallback
-        plan["question"] = fallback
-        logger.warning(
-            "Plan missing embedding_query/question; rebuilt from original_question (len=%d)",
-            len(fallback or ""),
-        )
-
     logger.info("Final plan for question '%s': %s", original_question, plan)
 
-    
+    # --- Core retrieval ---
     try:
         paired_hits, total_matches = ann_search(plan)
     except Exception as exc:
-        # Log full traceback server-side
         logger.exception("Error during ann_search for question: %s", original_question)
-        # TEMP: return error message to UI so we see what is breaking
         return f"ANN search error: {exc}"
 
     intent = (plan.get("intent") or "count").lower()
-
 
     # ==========================
     # NON-INSIGHT BRANCH
@@ -885,7 +1068,6 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
                     email = entity.get("email")
                     phone = entity.get("phone")
 
-                    # Optional: mask LinkedIn as markdown link
                     if linkedin:
                         name = entity.get("name") or f"Candidate {idx}"
                         contacts_bits.append(f"LinkedIn: [{name}]({linkedin})")
@@ -920,7 +1102,7 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     logger.info("Generated %d insight rows (total matches: %d)", len(top_hits), total_matches)
 
     required = [tool.strip().lower() for tool in plan.get("required_tools", []) if tool]
-    if not required and not plan.get("_jd_mode") :
+    if not required and not plan.get("_jd_mode"):
         required = list(DEFAULT_REQUIRED_TOOLS)
 
     tier_buckets: Dict[str, List[Dict[str, Any]]] = {label: [] for label in LABEL_ORDER}
@@ -936,10 +1118,10 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
             {
                 "entity": entity,
                 "sim": float(sim),
-                "covered": covered,
-                "missing": missing,
-                "weak_hits": weak_hits,
-                "tools": tools,
+                "covered": covered,      # usually a set of matched tools
+                "missing": missing,      # list of required tools not present
+                "weak_hits": weak_hits,  # dict: required -> [equivalents]
+                "tools": tools,          # normalized tools for the candidate
             }
         )
 
@@ -962,33 +1144,66 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
 
     sims_final = [entry["sim"] for entry in final_entries]
     percentiles = percentiles_min_rank(sims_final) if sims_final else []
+
+    # Should we include LinkedIn / email in the insight output?
     show_contacts = _should_show_contacts(original_question)
 
+    total_required = len(required) or 1
     formatted_rows: List[Dict[str, Any]] = []
+
     for idx, entry in enumerate(final_entries):
         entity = entry["entity"]
-        title = extract_latest_title(entity.get("employment_history"), entity.get("top_titles_mentioned"))
-        position = render_position(entity.get("career_stage", ""), title)
-        primary, secondary = select_industries(entity.get("primary_industry"), entity.get("sub_industries"))
-        overlaps = extract_overlaps(required, entry["tools"])
-        why = brief_why(entity, overlaps, max_len=120)
-        notes = notes_label(entry.get("rank_in_perfect"), entry["covered"], entry["missing"], entry["weak_hits"])
-        percentile_value = percentiles[idx] if percentiles else 100
-        tools_line = _tools_match_line(required, entry["tools"], entry["weak_hits"], entry["missing"])
-        row = format_row(
-             entity,
-             percentile_value,
-             entry["covered"],
-             len(required),
-             position,
-             primary,
-             secondary,
-             why,
-             notes,
-             show_contacts,
-             candidate_name=entity.get("name"),
-             tools_match=tools_line,
+        tools = entry["tools"]
+        missing_tokens = entry.get("missing") or []
+        weak_hits = entry.get("weak_hits") or {}
+
+        # how many JD skills this candidate effectively covers
+        covered_count = total_required - len(missing_tokens)
+
+        title = extract_latest_title(
+            entity.get("employment_history"),
+            entity.get("top_titles_mentioned"),
         )
+        position = render_position(entity.get("career_stage", ""), title)
+        primary, secondary = select_industries(
+            entity.get("primary_industry"),
+            entity.get("sub_industries"),
+        )
+        overlaps = extract_overlaps(required, tools)
+        why = brief_why(entity, overlaps, max_len=120)
+
+        notes = notes_label(
+            entry.get("rank_in_perfect"),
+            covered_count,
+            [_prettify_tool(m) for m in missing_tokens],
+            weak_hits,
+        )
+
+        percentile_value = percentiles[idx] if percentiles else 100
+
+        tools_line = _tools_match_line(
+            required=required,
+            normalized_tools=tools,
+            weak_hits=weak_hits,
+            missing=missing_tokens,
+            total=total_required,
+        )
+
+        row = format_row(
+            entity,
+            percentile_value,
+            covered_count,
+            total_required,
+            position,
+            primary,
+            secondary,
+            why,
+            notes,
+            show_contacts,
+            candidate_name=entity.get("name"),
+            tools_match=tools_line,
+        )
+
         evidence = evidence_snippets(entity)
         if evidence:
             row["evidence_preview"] = evidence[0]
@@ -1039,8 +1254,6 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     extras = [msg for msg in (scarcity_msg, dq_banner) if msg]
     preface = ("\n".join(extras) + "\n\n") if extras else ""
     return f"{header}\n\n{preface}{body}"
-
-
 
 def get_last_insight_result() -> Optional[Dict[str, Any]]:
     return LAST_INSIGHT_RESULT
