@@ -34,6 +34,9 @@ from recruiterbrain.shared_utils import (
     render_position,
     select_industries,
     tier_label,
+    classify_primary_gap,
+    experience_gap_comment,
+    build_gap_explanation
 )
 
 load_env()
@@ -118,21 +121,225 @@ _SKILL_STOPWORDS = {
     "etc", "etc.", "including", "include", "includes",
 }
 
-# Tokens we NEVER treat as skills (visa types, countries, raw numbers, etc.)
+# Tokens we NEVER treat as skills (visa types, countries, junky words, etc.)
 _SKILL_BLOCKLIST = {
-    "h1b", "h4", "gc", "ead", "us", "ca",
-    "30", "60", "6", "6+", "months", "month",
-    "sme",
+    # visa / work auth
+    "h1b", "h4", "gc", "ead", "c2c", "usc", "us citizen",
+    # generic junk / tiny tokens
+    "us", "ca", "il", "nj", "ny", "tx", "no", "it", "na",
+    "bs", "ms", "bs/ms", "b.s.", "m.s.", "degree",
+    "ad", "ip", "id",
+    "year", "years", "month", "months",
+    "remote", "onsite", "hybrid", "contract", "rate", "hr",
+    "location",
+    "more",
+    # generic roles we don't want as "skills" by themselves
+    "engineer", "developer", "analyst", "architect", "consultant",
+    "manager", "lead", "owner",
+    # misc
+    "fth", "fte",
 }
 
 # Phrases that usually start vague, non-technical fragments
 _NON_SKILL_PREFIXES = {
-    "define", "develop", "drives", "drive", "downtimes", "downtime",
-    "growth", "plans", "plan", "problem", "service", "services",
-    "solution", "solutions", "compatibility", "expertise", "experience",
-    "validate", "prepare", "produce", "performs", "build", "builds",
-    "quarterly", "optimization", "optimize", "manage", "manages",
+    "according",
+    "as",
+    "define", "develop", "drives", "drive",
+    "downtimes", "downtime", "growth", "plans", "plan",
+    "problem", "service", "services", "solution", "solutions",
+    "compatibility", "expertise", "validate", "prepare", "produce",
+    "performs", "perform", "build", "builds", "design", "designing",
+    "maintain", "maintains", "maintaining", "release", "releasing",
+    "optimization", "optimize", "manage", "manages", "managing",
+    "ability", "attitude", "autonomy",
+    "excellent", "strong", "solid",
+    "participate", "participates", "collaborate", "collaboration",
+    "create", "creating", "responsible", "works", "work",
+    "ensure", "ensures", "must", "should", "will",
+    "analyze", "analysing", "analyzing",
 }
+
+US_STATE_CODES = {
+    "al","ak","az","ar","ca","co","ct","de","fl","ga","hi","id","il","in","ia","ks","ky","la",
+    "me","md","ma","mi","mn","ms","mo","mt","ne","nv","nh","nj","nm","ny","nc","nd","oh","ok",
+    "or","pa","ri","sc","sd","tn","tx","ut","vt","va","wa","wv","wi","wy"
+}
+
+def _clean_skill_phrase(raw: str) -> str:
+    # Normalize spacing
+    txt = re.sub(r"\s+", " ", (raw or "")).strip()
+    if not txt:
+        return ""
+
+    lower = txt.lower()
+        # Drop query/instruction artefacts
+    if "give me" in lower or "their contact" in lower or "contyacty" in lower:
+        return ""
+
+    # Drop D2D labels from "D2D: Day to Day" sections
+    if lower in {"d2d", "d2d:"}:
+        return ""
+
+    # Drop pure US-style state abbreviations etc.
+    # Keep short language names like "go", "c", "r" explicitly.
+    SHORT_ALLOWED = {"go", "c", "r"}
+    if len(txt) <= 2 and lower not in SHORT_ALLOWED:
+        return ""
+
+
+    # Kill obvious html-entity junk like client&#39;
+    if "&#" in lower:
+        return ""
+
+    # If this looks like a sentence fragment (". " inside), skip it
+    if ". " in txt:
+        return ""
+
+    # Pure number / no letters -> drop
+    if not any(ch.isalpha() for ch in txt):
+        return ""
+
+    # Full-phrase patterns we never want as skills
+    if "years of experience" in lower or "year of experience" in lower:
+        return ""
+    if "month(s)" in lower or "months contract" in lower:
+        return ""
+    if "rate" in lower and ("$" in lower or "hr" in lower or "/hr" in lower):
+        return ""
+    if "location" in lower:
+        return ""
+
+    # Collapse things like "1 year in Gen AI" into "gen ai"
+    m = re.search(r"\b\d+\s+year[s]?\s+in\s+(gen ai|genai|ai/ml|nlp)\b", lower)
+    if m:
+        return m.group(1).strip()
+
+    # Normalize punctuation at edges
+    txt = txt.strip(",.;:-/\\()[]{}")
+    lower = txt.lower()
+    if not txt:
+        return ""
+
+    # Blocklisted tokens as-is
+    if lower in _SKILL_BLOCKLIST:
+        return ""
+
+    # Split into words
+    words = lower.split()
+
+    # Remove tokens that are just bullets/punctuation (e.g. "•")
+    words = [w for w in words if any(ch.isalnum() for ch in w)]
+    if not words:
+        return ""
+    if len(words) > 3:
+         return ""
+
+    # Strip leading stopwords like "the", "a", "an"
+    while words and words[0] in _SKILL_STOPWORDS:
+        words.pop(0)
+    if not words:
+        return ""
+
+    # If starts with a generic verb / vague prefix -> treat as non-skill
+    if words[0] in _NON_SKILL_PREFIXES:
+        return ""
+
+    # If it looks like "3rd party tools X" -> keep only the tech at the end
+    generic_prefix = {
+        "3rd", "third", "party", "tools", "tool", "the", "for",
+        "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        "year", "years", "month", "months", "total", "of", "in", "+", "plus",
+    }
+    if len(words) >= 3 and all(w in generic_prefix for w in words[:-2]):
+        words = words[-2:]
+
+    # Too long -> likely a sentence or description, not a skill
+    if len(words) > 6:
+        return ""
+    if "give me" in lower and "contact" in lower:
+         return ""
+    if lower in {"d2d", "d2d:", "day to day"}:
+         return ""
+
+    # Drop location-style tokens
+    # 'nyc', 'nj', 'ny', state codes, etc.
+    tok = lower.replace(".", "")
+    if tok in US_STATE_CODES or tok in {"nyc", "nj", "ny"}:
+         return ""
+
+    # Drop SOW-related tokens
+    if tok in {"sow", "statement of work"}:
+         return ""
+
+
+    # Remove trailing generic words
+    while words and words[-1] in _SKILL_STOPWORDS:
+        words.pop()
+    if not words:
+        return ""
+
+    # --- NEW: drop clearly soft / managerial phrases with no tech in them ---
+    SOFT_MID_WORDS = {
+        "aspiration", "aspirations", "goals", "goal",
+        "resources", "resource",
+        "strategy", "strategies",
+        "framework", "frameworks",
+        "policy", "policies", "governance",
+        "mentorship", "mentor", "coaching", "guidance",
+        "culture", "environment",
+        "stakeholders", "stakeholder",
+        "team", "teams", "users", "business",
+        "support", "supporting", "collaboration", "collaborate",
+        "manage", "managing", "allocate", "allocating",
+        "monitor", "monitoring", "evaluate", "evaluation",
+        "optimize", "optimizing", "tune", "tuning",
+    }
+
+    TECH_HINTS = {
+        "ai", "ml", "nlp", "llm", "genai", "gen", "gen ai",
+        "python", "r", "sql", "oracle", "snowflake", "mongodb",
+        "spark", "hadoop", "kafka", "dbt", "airflow",
+        "azure", "aws", "openai", "openai api", "azure openai",
+        "salesforce", "service", "cloud", "service cloud",
+        "etl", "warehouse", "warehousing", "data",
+    }
+
+    if any(w in SOFT_MID_WORDS for w in words) and not any(
+        w in TECH_HINTS for w in words
+    ):
+        return ""
+
+    # --- Salesforce phrase collapsing: prefer concrete clouds over generic SFDC ---
+    if "salesforce" in words:
+        if "service" in words and "cloud" in words:
+            return "service cloud"
+        if "health" in words and "cloud" in words:
+            return "health cloud"
+        if "experience" in words and "cloud" in words:
+            return "experience cloud"
+        return "salesforce"
+
+    cleaned = " ".join(words)
+
+    # Final guards
+    if cleaned in _SKILL_STOPWORDS or cleaned in _SKILL_BLOCKLIST:
+        return ""
+
+    # Filter out common soft-phrases we never want as skills
+    SOFT_SNIPPETS = [
+        "take business requirements",
+        "problem solving",
+        "communication skills",
+        "dynamism and flexibility",
+        "knowledge of english",
+        "as a senior developer",
+        "as a senior",
+    ]
+    for snippet in SOFT_SNIPPETS:
+        if snippet in cleaned:
+            return ""
+
+    return cleaned
 
 
 def extract_jd_block(text: str) -> str:
@@ -206,68 +413,52 @@ def find_new_skills_for_catalog(
             new.append(key)
     return new
 
-def _clean_skill_phrase(raw: str) -> str:
-    # Normalize spacing and lower
-    txt = re.sub(r"\s+", " ", raw).strip().lower()
-    # Strip leading/trailing punctuation
-    txt = txt.strip(",.;:-/\\()[]{}")
-    if not txt:
-        return ""
-
-    # Pure numbers or tokens with no letters -> drop
-    if not any(ch.isalpha() for ch in txt):
-        return ""
-
-    # Blocklisted "skills" (visa types, raw nums, etc.)
-    if txt in _SKILL_BLOCKLIST:
-        return ""
-
-    # Split into words
-    words = txt.split()
-
-    # Too long → likely a sentence, not a skill
-    if len(words) > 6:
-        return ""
-
-    # If phrase starts with a verb/generic word, treat as non-skill
-    if words[0] in _NON_SKILL_PREFIXES:
-        return ""
-
-    # Remove trailing generic words
-    while words and words[-1] in _SKILL_STOPWORDS:
-        words.pop()
-    if not words:
-        return ""
-
-    cleaned = " ".join(words)
-
-    # Still blocklist / stopword after trimming?
-    if cleaned in _SKILL_STOPWORDS or cleaned in _SKILL_BLOCKLIST:
-        return ""
-
-    return cleaned
-
 
 
 def _extract_skill_candidates_from_sections(text: str) -> List[str]:
     """
     Pulls likely skills from JD sections that talk about 'Mandatory Skills',
     'Requirements', 'What we need to see', etc.
+
+    We ONLY treat a line as a "skills" line if:
+      - One of SKILL_SECTION_HINTS appears near the beginning, AND
+      - There's a ':' after that hint (e.g. 'Requirements: ...').
+    This avoids matching random sentences that just mention 'requirements' later.
     """
     skills: List[str] = []
     lines = text.splitlines()
 
     for line in lines:
         lower = line.lower()
-        if any(hint in lower for hint in SKILL_SECTION_HINTS):
-            # Take part after ':' if present, else whole line
-            after = line.split(":", 1)[-1] if ":" in line else line
-            # Split on common separators
-            chunks = re.split(r"[,/•;]| and | AND ", after)
-            for chunk in chunks:
-                skill = _clean_skill_phrase(chunk)
-                if skill:
-                    skills.append(skill)
+
+        # Decide if this line is actually a skills header
+        is_skill_line = False
+        for hint in SKILL_SECTION_HINTS:
+            idx = lower.find(hint)
+            if idx == -1:
+                continue
+            # require the hint to be relatively near the start
+            if idx > 40:
+                continue
+            # and require a ':' after the hint
+            colon_slice = lower[idx:]
+            if ":" not in colon_slice:
+                continue
+            is_skill_line = True
+            break
+
+        if not is_skill_line:
+            continue
+
+        # Take part after ':' as the "values" region
+        after = line.split(":", 1)[-1]
+        # Split on common separators
+        chunks = re.split(r"[,/•;]| and | AND ", after)
+        for chunk in chunks:
+            skill = _clean_skill_phrase(chunk)
+            if skill:
+                skills.append(skill)
+
     return skills
 
 
@@ -687,6 +878,24 @@ def _derive_required_tools(plan: Dict[str, Any]) -> List[str]:
             if token not in collected:
                 collected.append(token)
     return collected
+def _canonicalize_required_tools(required: List[str]) -> List[str]:
+    """
+    Final cleanup for required_tools:
+    - run through _clean_skill_phrase
+    - dedupe
+    - drop anything that doesn't survive cleaning
+    """
+    cleaned: List[str] = []
+    seen = set()
+    for t in required or []:
+        c = _clean_skill_phrase(t)
+        if not c:
+            continue
+        if c in seen:
+            continue
+        seen.add(c)
+        cleaned.append(c)
+    return cleaned
 
 
 def _route_insight(question: str) -> tuple[bool, float]:
@@ -956,34 +1165,137 @@ def llm_plan(question: str) -> Dict[str, Any]:
         plan = _default_plan(planner_question)
     else:
         system_prompt = (
-            "You parse recruiting and sourcing questions into a JSON plan for Milvus retrieval over a resume collection. "
-            "Never add fields not in this schema. Output ONLY JSON (no prose). Keys:\n"
-            "{\n"
-            '  "intent": "count|list|why",\n'
-            '  "vector_field": "summary_embedding|skills_embedding",\n'
-            '  "must_have_keywords": ["keyword", ...],\n'
-            '  "industry_equals": "string or null",\n'
-            '  "require_domains": ["Healthcare IT","Construction","CAD","NLP","GenAI", ...],\n'
-            '  "require_career_stage": "Entry|Mid|Senior|Lead/Manager|Director+|Any",\n'
-            '  "networking_required": true|false,\n'
-            '  "top_k": 1000,\n'
-            '  "return_top": 20\n'
-            "}\n"
-            "INTERPRET YEARS OF EXPERIENCE AS CAREER STAGE USING THESE RULES:\n"
-            "- 0–3 years, or phrases like 'junior', 'entry level', 'new grad', 'fresher' -> require_career_stage = 'Entry'.\n"
-            "- 3–5 years, or phrases like 'mid level', 'intermediate' -> require_career_stage = 'Mid'.\n"
-            "- 5+ years, or phrases like 'senior', '8+ years', '10 years', 'principal', 'staff', "
-            "  or any explicit 'minimum of 5 years' -> require_career_stage = 'Senior'.\n"
-            "- If the user explicitly asks for a management level (e.g. 'team lead', 'engineering manager', "
-            "  'director'), use 'Lead/Manager' or 'Director+' instead of 'Senior'.\n"
-            "- If the question does NOT clearly specify experience or level, set require_career_stage = 'Any'.\n"
-            "OTHER RULES:\n"
-            "- If the user asks for 'total how many', set intent = 'count'.\n"
-            "- If they want a list of candidates, set intent = 'list'.\n"
-            "- If they want an explanation or justification ('why', 'explain'), set intent = 'why'.\n"
-            "- Use 'summary_embedding' by default for vector_field.\n"
-            "- Only include 'industry_equals' or 'require_domains' when the question clearly specifies an industry or domain.\n"
-        )
+    "You parse recruiting and sourcing questions into a JSON plan for Milvus retrieval over a resume collection. "
+    "Never add fields not in this schema. Output ONLY JSON (no prose). Keys:\n"
+    "{\n"
+    '  "intent": "count|list|why",\n'
+    '  "vector_field": "summary_embedding|skills_embedding",\n'
+    '  "must_have_keywords": ["keyword", ...],\n'
+    '  "industry_equals": "string or null",\n'
+    '  "require_domains": ["Healthcare IT","Construction","CAD","NLP","GenAI", ...],\n'
+    '  "require_career_stage": "Entry|Mid|Senior|Lead/Manager|Director+|Any",\n'
+    '  "networking_required": true|false,\n'
+    '  "top_k": 1000,\n'
+    '  "return_top": 20\n'
+    "}\n"
+    "\n"
+    "GENERAL BEHAVIOR:\n"
+    "- The user message may be either a short natural-language query (e.g. 'top 10 java + kafka developers') "
+    "  OR a full job description / JD email with responsibilities and required skills.\n"
+    "- Your job is ONLY to produce a retrieval plan, not to rewrite the JD.\n"
+    "- Always output STRICT JSON, no comments and no extra keys.\n"
+    "- NEVER treat meta-requests like 'and also give me their contact', 'explain why', "
+    "  'give me their LinkedIn', or 'why these candidates' as skills. Those requests affect only what the user wants, "
+    "  not the JD. Do NOT put any part of such sentences into 'must_have_keywords' or 'require_domains'.\n"
+    "\n"
+    "VECTOR FIELD CHOICE:\n"
+    "- Use 'summary_embedding' for most queries, especially:\n"
+    "  - When the text is a full JD / long description.\n"
+    "  - When the query describes responsibilities, domain, seniority.\n"
+    "- Use 'skills_embedding' ONLY when the question is mostly a list of explicit skills/technologies "
+    "  (e.g. 'python, kafka, kubernetes, terraform devops engineers').\n"
+    "\n"
+    "INTERPRET YEARS OF EXPERIENCE AS CAREER STAGE USING THESE RULES:\n"
+    "- 0–3 years, or phrases like 'junior', 'entry level', 'new grad', 'fresher' -> require_career_stage = 'Entry'.\n"
+    "- 3–5 years, or phrases like 'mid level', 'intermediate' -> require_career_stage = 'Mid'.\n"
+    "- 5+ years, or phrases like 'senior', '8+ years', '10 years', 'principal', 'staff', "
+    "  or any explicit 'minimum of 5 years' -> require_career_stage = 'Senior'.\n"
+    "- If the user explicitly asks for a management level (e.g. 'team lead', 'engineering manager', "
+    "  'director'), use 'Lead/Manager' or 'Director+' instead of 'Senior'.\n"
+    "- If the question does NOT clearly specify experience or level, set require_career_stage = 'Any'.\n"
+   "- The JSON schema does NOT encode exact year thresholds; do NOT try to filter out candidates based "
+"on exact years of experience. Treat '8+ years' the same as 'Senior' and let downstream scoring "
+"decide if a candidate with 6–7 years is acceptable (with a note such as 'missing 2 years of experience'). "
+"Even for '5+ years' JDs, do not hard-filter out 3–4 year candidates; simply mark them as having an experience gap.\n"
+
+    "\n"
+    "INTENT:\n"
+    "- If the user asks for 'total how many', 'how many', 'count', or 'total', set intent = 'count'.\n"
+    "- If they want a list of candidates (e.g. 'list', 'show', 'top 10', 'give me candidates'), set intent = 'list'.\n"
+    "- If they want an explanation or justification ('why', 'explain', 'why these candidates'), set intent = 'why'.\n"
+    "- If the user combines a JD with a meta request like 'and also give me their contact', "
+    "  still treat this as intent = 'list' (or 'count'/'why' as appropriate) and ignore that meta sentence "
+    "  when building 'must_have_keywords'.\n"
+    "\n"
+    "RULES FOR 'must_have_keywords':\n"
+    "- Treat 'must_have_keywords' as the core REQUIRED skills/technologies/platforms/tools for the search.\n"
+    "- Each keyword must be:\n"
+    "  - SHORT (1–3 words),\n"
+    "  - A concrete technology, platform, framework, language, tool, database, cloud service, or certification.\n"
+    "  - Lowercase (e.g. 'python', 'aws glue', 'aws cdk', 'spark', 'hadoop', 'azure open ai', "
+    "    'salesforce service cloud', 'palo alto', 'bgp', 'ospf').\n"
+    "- DO NOT include full sentences or responsibility phrases (e.g. 'analyze the customer needs', "
+    "  'strong communication skills', 'work with stakeholders', 'encouraging the exploration of new approaches').\n"
+    "- DO NOT include:\n"
+    "  - Locations (city, state, country), including state abbreviations like 'nv', 'il', 'ia', 'la', etc.\n"
+    " DO NOT include locations, even if written as abbreviations or city names:"
+    "Examples to ignore: 'nyc', 'nj', 'new york', '30 rockefeller plaza', 'onsite', '3 days/week'."
+    "-DO NOT include SOW-related words like 'sow', 'statement of work', 'backfill', 'competition'."
+
+    "  - Company names or client names.\n"
+    "  - Rates, compensation, '60/hr', '$55', 'c2c', 'w2', '1099'.\n"
+    "  - Contract length or duration ('12 months', '2-year contract').\n"
+    "  - Visa / work authorization terms ('h1b', 'gc', 'ead', 'usc').\n"
+    "  - Generic role nouns by themselves ('developer', 'engineer', 'architect', 'analyst') "
+    "    unless paired with a specific platform (e.g. 'salesforce engineer' is okay but 'engineer' alone is not).\n"
+    "  - Soft skills ('communication', 'team player', 'problem solving', 'self starter', 'fast paced environment').\n"
+    "  - Generic business phrases ('according to a client', 'this role will be responsible for', 'd2d', 'day to day').\n"
+    "  - Meta/instruction phrases from the user ('also give me their contact', 'and send me emails').\n"
+    "- DO NOT include brand/TV/network names like 'nbc', 'msnbc', 'cnbc' as skills.\n"
+    "- DO NOT include scheduling or workstyle terms like 'remote', 'onsite', 'hybrid', '2 days onsite'.\n"
+    "- DO NOT include very generic conceptual phrases like 'big data technologies', 'cloud-based ai', "
+    "  'development', 'implementation', 'aspirations', 'strategy', 'governance policies', 'frameworks and best practices'. "
+    "  Instead, extract the **concrete tools** mentioned near them (e.g. 'spark', 'hadoop', 'aws', 'azure open ai').\n"
+    "- Deduplicate keywords. If the JD says 'java and spring boot' and 'core java', you can use 'java' and 'spring boot'.\n"
+    "- Prefer canonical names (e.g. 'active directory' instead of 'ad', 'identity and access management' or 'iam').\n"
+    "- For an AWS Glue / AWS CDK JD like:\n"
+    "  'Extensive Python, AWS Glue, AWS CDK, Infrastructure as Code, automated release management'\n"
+    "  a good 'must_have_keywords' list would be:\n"
+    "  ['python', 'aws glue', 'aws cdk', 'aws']\n"
+    "  (You may omit 'infrastructure as code' and 'automated release management' as separate keywords, "
+    "  unless a specific IaC tool like 'terraform' or 'cloudformation' is named.)\n"
+    "- For a GenAI Lead JD like:\n"
+    "  '8+ years, 2+ years AI/ML, 1+ year GenAI/NLP, big data (Hadoop/Spark), Azure Open AI/AWS, Python/R, LLMs'\n"
+    "  good 'must_have_keywords' would be:\n"
+    "  ['python', 'ai/ml', 'gen ai', 'nlp', 'llm', 'spark', 'hadoop', 'azure open ai', 'aws'].\n"
+    "\n"
+    "- Each 'must_have_keywords' item must be at most 3 words long."
+    "- Never output more than 15 distinct 'must_have_keywords' items, even for long JDs."
+    "- If you find longer phrases ('architectural principles develop high quality', 'access control financial services cloud'),"
+    "break them into the concrete technologies instead (e.g. 'salesforce', 'service cloud', 'access control') or drop them"
+    "if they are not concrete tools."
+
+    "RULES FOR 'require_domains' AND 'industry_equals':\n"
+    "- Use 'industry_equals' ONLY when the question clearly specifies a primary industry "
+    "  (e.g. 'healthcare', 'finance', 'logistics', 'education', 'manufacturing', 'retail', 'government').\n"
+    "- Use 'require_domains' for specific domain expertise or subdomains (e.g. 'Healthcare IT', 'NLP', 'GenAI', "
+    "  'IAM', 'cybersecurity', 'salesforce service cloud', 'palo alto', 'rpa uipath', 'mlops').\n"
+    "- DO NOT repeat the same tokens in both 'must_have_keywords' and 'require_domains' unless clearly necessary.\n"
+    "- DO NOT put locations, rates, visa types, or company names into 'require_domains'.\n"
+    "- Ignore section labels like 'Must Haves:', 'Requirements:', 'Responsibilities:', 'D2D:', "
+    "  'Day to Day:', 'What you will do:' when building keywords and domains.\n"
+    "\n"
+    "JD VS. SHORT QUERY HANDLING:\n"
+    "- If the text looks like a full JD (mentions 'Responsibilities', 'What you will do', 'Must have', 'Required', "
+    "  or long bullet lists), treat it as a JOB DESCRIPTION.\n"
+    "  - In that case, extract the main technologies/tools/platforms from the JD into 'must_have_keywords'.\n"
+    "  - Do NOT put responsibilities sentences, legal text, or boilerplate into 'must_have_keywords'.\n"
+    "- If the text is a short query, just map explicit skill mentions (e.g. 'java', 'kafka', 'spring boot', 'aws', "
+    "  'terraform', 'ansible', 'uipath', 'forgerock', 'saviynt', 'salesforce') into 'must_have_keywords'.\n"
+    "- If the short query also says something like 'and give me their contact', ignore that phrase entirely "
+    "  when building keywords or domains.\n"
+    "\n"
+    "OTHER RULES:\n"
+    "- Use 'summary_embedding' by default for vector_field unless the query is almost purely a skill list, "
+    "  then you may use 'skills_embedding'.\n"
+    "- Only include 'industry_equals' or 'require_domains' when the question clearly specifies an industry or domain.\n"
+    "- If the question does not talk about networking or introductions at all, set 'networking_required' = false.\n"
+    "- Always set numeric fields as integers: 'top_k' (default 1000) and 'return_top' (default 20) unless the query "
+    "  strongly implies a different number (e.g. 'top 5' -> return_top = 5).\n"
+    "- Never add extra JSON keys beyond the schema. Never output prose or explanations.\n"
+)
+
+
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -1079,6 +1391,8 @@ def llm_plan(question: str) -> Dict[str, Any]:
         plan["embedding_query"] = cleaned_for_embed or original
         plan["required_tools"] = normalized_tools
 
+
+    plan["required_tools"] = _canonicalize_required_tools(plan.get("required_tools") or [])
     # If lots of tools, treat as insight even if LLM didn't say so.
     if plan.get("intent") != "insight" and len(plan.get("required_tools") or []) >= 3:
         plan["intent"] = "insight"
@@ -1108,12 +1422,28 @@ def _scarcity_message(tier_counts: Dict[str, int], missing_counter: Dict[str, in
     if tier_counts.get("Perfect", 0) == 0 and tier_counts.get("Good", 0) == 0:
         if not missing_counter:
             return "Few strong matches. Consider allowing 2/4 or accepting Pinecone/Weaviate as equivalents."
-        top_missing = max(missing_counter.items(), key=lambda item: item[1])[0]
+
+        # Filter out junk/non-skill keys before choosing "top missing"
+        filtered: Dict[str, int] = {}
+        for key, count in missing_counter.items():
+            clean = _clean_skill_phrase(key)
+            if not clean:
+                continue
+            filtered[clean] = filtered.get(clean, 0) + count
+
+        if not filtered:
+            return "Few strong matches. Consider relaxing strict must-have requirements."
+
+        top_missing = max(filtered.items(), key=lambda item: item[1])[0]
         top_missing_pretty = _prettify_tool(top_missing)
-        return (
-            f"Most candidates missing {top_missing_pretty}. Consider allowing 2/4 or "
-            "accepting Pinecone/Weaviate as equivalents."
-        )
+        VECTOR_DB_FAMILY = {"milvus", "pinecone", "weaviate", "qdrant", "chroma", "faiss"}
+        if top_missing_pretty.lower() in VECTOR_DB_FAMILY:
+             return (
+                f"Most candidates missing {top_missing_pretty}. "
+                "Consider allowing 2/4 or accepting Pinecone/Weaviate as equivalents."
+            )
+
+        return f"Most candidates missing {top_missing_pretty}. Consider relaxing that requirement or treating it as a nice-to-have."
     return None
 
 
@@ -1372,6 +1702,30 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
 
         # how many JD skills this candidate effectively covers
         covered_count = total_required - len(missing_tokens)
+        jd_text = plan.get("_jd_raw") or plan.get("question") or ""
+
+        exp_comment = experience_gap_comment(jd_text, entity)
+        has_experience_gap = exp_comment is not None
+
+        # Domain match: JD require_domains vs candidate domains_of_expertise
+        jd_domains = set(plan.get("require_domains") or [])
+        cand_domains = set(entity.get("domains_of_expertise") or [])
+        # If JD doesn't specify domains, treat as match (we don't penalize)
+        has_domain_match = True if not jd_domains else bool(jd_domains & cand_domains)
+
+        primary_gap = classify_primary_gap(
+            skills_covered=covered_count,
+            skills_total=total_required,
+            has_experience_gap=has_experience_gap,
+            has_domain_match=has_domain_match,
+        )
+        gap_explanation = build_gap_explanation(
+            entity=entity,
+            jd_text=jd_text,
+            required_tools=required,
+            missing_tools=missing_tokens,
+            primary_gap=primary_gap,
+)
 
         title = extract_latest_title(
             entity.get("employment_history"),
@@ -1385,12 +1739,27 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
         overlaps = extract_overlaps(required, tools)
         why = brief_why(entity, overlaps, max_len=120)
 
-        notes = notes_label(
+        base_notes = notes_label(
             entry.get("rank_in_perfect"),
             covered_count,
             [_prettify_tool(m) for m in missing_tokens],
             weak_hits,
         )
+
+        # Attach experience + primary gap info to notes
+        extra_bits: List[str] = []
+        if exp_comment:
+            extra_bits.append(exp_comment)  # e.g. "JD requires 8+ years; candidate has 6.1 (short by ~1.9 years)."
+        if primary_gap and primary_gap != "none":
+            extra_bits.append(f"Primary gap: {primary_gap}")
+        if gap_explanation:
+          extra_bits.append(gap_explanation)
+
+
+        notes = base_notes
+        if extra_bits:
+            notes = base_notes + " " + " ".join(extra_bits)
+
 
         percentile_value = percentiles[idx] if percentiles else 100
 
@@ -1416,6 +1785,10 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
             candidate_name=entity.get("name"),
             tools_match=tools_line,
         )
+        row["experience_comment"] = exp_comment
+        row["primary_gap"] = primary_gap
+        row["gap_explanation"] = gap_explanation
+
 
         evidence = evidence_snippets(entity)
         if evidence:
@@ -1446,6 +1819,8 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
              f"{row.get('position','')}\t"
              f"{row.get('tools_match','')}\t"
              f"{row['notes']}"
+              + "-" * 60
+                + "\n"
         )
         body = "\n".join(table_lines)
         if show_contacts:

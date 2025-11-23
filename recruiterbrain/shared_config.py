@@ -531,6 +531,62 @@ WEAK_EQUIVALENTS: Dict[str, Set[str]] = {
     # Infra / Virtualization
     "vmware vsphere": {"nutanix ahv"},
     "rhel": {"centos", "rocky linux"},
+     # Vector DB ecosystem
+    "milvus": {"faiss", "annoy", "hnswlib", "pinecone", "weaviate", "qdrant", "chroma"},
+
+    # GenAI / AI / ML
+    "gen ai": {"generative ai", "genai", "llm"},
+    "genai": {"gen ai", "generative ai", "llm"},
+    "llm": {"gen ai", "genai", "large language model"},
+    "ai/ml": {"ai", "ml", "machine learning"},
+    "ai": {"ai/ml", "machine learning"},
+    "ml": {"ai/ml", "machine learning"},
+
+    # Cloud AI
+    "azure open ai": {"azure openai", "azure openai service", "openai", "openai api"},
+    "openai": {"azure openai", "azure open ai", "openai api"},
+    "openai api": {"openai", "azure openai", "azure open ai"},
+
+    # Data warehousing / modeling
+    "data warehouse": {"data warehousing", "data mart", "data marts", "data models"},
+    "data warehousing": {"data warehouse", "data mart", "data marts"},
+    "data mart": {"data warehouse", "data warehousing"},
+    "data marts": {"data warehouse", "data warehousing"},
+    "data models": {"data modeling", "data warehouse"},
+    "data modeling": {"data models", "data warehouse"},
+
+    # ETL wording
+    "etl pipelines": {"etl"},
+    "etl": {"etl pipelines"},
+
+    # Salesforce clouds
+    "service cloud": {"salesforce service cloud", "salesforce"},
+    "salesforce": {"service cloud", "salesforce health cloud", "experience cloud"},
+
+    # BI tools
+    "power bi": {"tableau", "looker"},
+    "tableau": {"power bi", "looker"},
+   
+    # GenAI / AI / ML
+    "gen ai": {"generative ai", "genai", "llm"},
+    "genai": {"gen ai", "generative ai", "llm"},
+    "llm": {"gen ai", "genai", "large language model"},
+    "ai/ml": {"ai", "ml", "machine learning"},
+    "ai": {"ai/ml", "machine learning"},
+    "ml": {"ai/ml", "machine learning"},
+
+    # Big data / DW
+    "big data": {"spark", "hadoop"},
+    "data warehouse": {"data warehousing", "data mart", "data marts", "data models"},
+
+    # Cloud AI
+    "azure open ai": {"azure openai", "openai", "openai api"},
+    "openai": {"azure open ai", "openai api"},
+    "openai api": {"openai", "azure open ai"},
+
+    # Salesforce / etc. as needed...
+
+
 }
 
 LABEL_ORDER: List[str] = ["Perfect", "Good", "Acceptable", "Partial"]

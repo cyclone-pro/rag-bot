@@ -218,6 +218,8 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
             "domains_of_expertise",
             "primary_industry",
             "sub_industries",
+            "keywords_summary",   
+            "semantic_summary",
         ],
     )
 
@@ -263,14 +265,21 @@ def coverage(required_tools: List[str], normalized_tools: set[str]) -> Tuple[int
             continue
 
         # ---- strong match: exact or substring match ----
-        if any(
-            req_norm == tool
-            or req_norm in tool
-            or tool in req_norm
-            for tool in norm_tools
-        ):
+                # ---- strong match: exact or LIMITED substring match ----
+        def strong_match(req_norm: str, tool: str) -> bool:
+             if req_norm == tool:
+                return True
+
+            # Only allow substring matching for reasonably long tokens,
+            # to avoid "la" matching "flask", "ia" matching "gcia", etc.
+             if len(req_norm) >= 4 and len(tool) >= 4:
+                 return req_norm in tool or tool in req_norm
+             return False
+
+        if any(strong_match(req_norm, tool) for tool in norm_tools):
             covered_set.add(req_norm)
             continue
+
 
         # ---- weak match via WEAK_EQUIVALENTS ----
         hits: List[str] = []
@@ -396,7 +405,171 @@ def notes_label(
     base = "partial match"
     return _append_near_miss(base, weak_hits)
 
+def classify_primary_gap(
+    skills_covered: int,
+    skills_total: int,
+    has_experience_gap: bool,
+    has_domain_match: bool,
+) -> str:
+    """
+    Returns 'skills', 'experience', 'industry', 'experience and skills',
+    'experience and industry', 'skills and industry', or 'none'.
+    """
+    # Skill coverage ratio
+    ratio = skills_covered / skills_total if skills_total > 0 else 1.0
 
+    # Decide thresholds
+    skill_weak = ratio < 0.5
+    exp_weak = has_experience_gap
+    industry_weak = not has_domain_match
+
+    # Priority order: experience > skills > industry
+    if exp_weak and (not skill_weak) and (not industry_weak):
+        return "experience"
+    if skill_weak and (not exp_weak) and (not industry_weak):
+        return "skills"
+    if industry_weak and (not exp_weak) and (not skill_weak):
+        return "industry"
+
+    # If multiple are weak, pick the worst combo
+    if exp_weak and skill_weak and not industry_weak:
+        return "experience and skills"
+    if exp_weak and industry_weak and not skill_weak:
+        return "experience and industry"
+    if skill_weak and industry_weak and not exp_weak:
+        return "skills and industry"
+
+    # All three weak → you can choose one; I’d call it "experience and skills"
+    if exp_weak and skill_weak and industry_weak:
+        return "experience and skills"
+
+    return "none"
+
+def build_gap_explanation(
+    entity: Dict[str, Any],
+    jd_text: str,
+    required_tools: List[str],
+    missing_tools: List[str],
+    primary_gap: str,
+) -> Optional[str]:
+    """
+    Build a short human-readable explanation for why this candidate is not a strong fit.
+
+    Examples:
+    - "Missing core JD tools: Excel, SharePoint, document automation. Candidate tools focus on Python, GraphQL, AWS; domains: NLP, Software Engineering."
+    - "Meets skill requirements, but short on required experience (JD requires 8+ years; candidate has 5.1)."
+    - "Skills and experience are good, but domain mismatch: JD is Legal/Professional Services, candidate is NLP / CAD / Software Engineering."
+    """
+    jd_text_lower = (jd_text or "").lower()
+    if not required_tools and not missing_tools and primary_gap == "none":
+        return None
+
+    # Hard constraints: missing required tools (limit to 3 for readability)
+    missing_pretty = [t for t in missing_tools][:3]
+
+    # Candidate context
+    cand_domains = entity.get("domains_of_expertise") or []
+    cand_domains_str = ", ".join(cand_domains[:3])
+    cand_primary_industry = entity.get("primary_industry") or ""
+    cand_tools = entity.get("skills_extracted") or []
+    if not cand_tools:
+        cand_tools = entity.get("tools_and_technologies") or []
+    cand_tools_str = ", ".join(str(t) for t in cand_tools[:4])
+
+    parts: List[str] = []
+
+    if "skills" in primary_gap and missing_pretty:
+        parts.append(
+            "Missing core JD tools: "
+            + ", ".join(missing_pretty)
+            + "."
+        )
+
+    if "experience" in primary_gap:
+        years = entity.get("total_experience_years")
+        if isinstance(years, (int, float)):
+            parts.append(f"Candidate has {years:.1f} years of total experience, which is below the JD's senior expectation.")
+
+    if "industry" in primary_gap:
+        # Very simple heuristic: if JD text mentions 'legal' or 'law' and candidate is not,
+        # highlight that mismatch.
+        if "legal" in jd_text_lower or "law" in jd_text_lower:
+            parts.append(
+                "JD is for a Legal / professional services role, but candidate domains are: "
+                + (cand_domains_str or "not clearly legal-focused")
+                + "."
+            )
+        elif cand_primary_industry:
+            parts.append(
+                f"JD domain differs from candidate's primary industry ({cand_primary_industry})."
+            )
+        else:
+            parts.append(
+                "JD domain differs from candidate's current domains."
+            )
+
+    # If we haven't explained anything but we know tools/domains, still add a generic sentence
+    if not parts:
+        if cand_tools_str or cand_domains_str:
+            parts.append(
+                f"Candidate tools: {cand_tools_str or 'N/A'}; domains: {cand_domains_str or 'N/A'}."
+            )
+
+    if not parts:
+        return None
+
+    return " ".join(parts)
+
+def _extract_min_years_from_jd(jd_text: str) -> Optional[int]:
+    """
+    Very simple heuristic: find patterns like '5+ years', '8+ years', '10 years of experience'.
+    Return the highest number we see, or None if not found.
+    """
+    if not jd_text:
+        return None
+
+    years = []
+    # matches '5+ years', '8+ years of', etc.
+    for m in re.finditer(r"(\d+)\s*\+\s*years", jd_text.lower()):
+        years.append(int(m.group(1)))
+    # matches '5 years of experience', '10 years experience'
+    for m in re.finditer(r"(\d+)\s+years(?:\s+of)?\s+experience", jd_text.lower()):
+        years.append(int(m.group(1)))
+
+    return max(years) if years else None
+
+
+def _compute_total_years_from_history(entity: Dict[str, Any]) -> Optional[float]:
+    """
+    If you already pre-compute 'years_of_experience' somewhere, use that.
+    Otherwise, this can sum employment_history ranges.
+    For now we assume you have a field 'years_of_experience' on the entity.
+    """
+    yrs = entity.get("years_of_experience")
+    if isinstance(yrs, (int, float)):
+        return float(yrs)
+    return None
+
+
+def experience_gap_comment(jd_text: str, entity: Dict[str, Any]) -> Optional[str]:
+    """
+    Returns a string like:
+    'JD requires 8+ years; candidate has 6.0 (short by ~2 years).'
+    or None if we can't compute.
+    """
+    jd_min = _extract_min_years_from_jd(jd_text)
+    cand_yrs = _compute_total_years_from_history(entity)
+
+    if jd_min is None or cand_yrs is None:
+        return None
+
+    delta = jd_min - cand_yrs
+    if delta <= 0:
+        # candidate meets or exceeds years
+        return None
+
+    # This is your -2 years tolerance: don't reject, just mention it.
+    return f"JD requires {jd_min}+ years; candidate has {cand_yrs:.1f} (short by ~{delta:.1f} years)."
 def brief_why(
     entity: Dict[str, Any],
     overlaps: List[str],
