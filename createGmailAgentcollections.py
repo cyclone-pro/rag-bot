@@ -3,24 +3,28 @@ Create Milvus collections for Gmail agent:
 - conv_recruiter
 - conv_candidate
 - applications
-
-Requires:
-    pip install pymilvus
 """
-
+import os
+from urllib.parse import urlparse
+from dotenv import load_dotenv
 from pymilvus import (
     connections,
     db,
-    FieldSchema, CollectionSchema, DataType, Collection
+    FieldSchema, CollectionSchema, DataType, Collection, utility
 )
+load_dotenv()
 
 # ==========================
 # CONFIG
 # ==========================
+MILVUS_URI = os.getenv("MILVUS_URI", "http://34.135.232.156:19530")
+_parsed_milvus_uri = urlparse(MILVUS_URI)
+MILVUS_DB = os.getenv("MILVUS_DB", "default")
+MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", None)
 MILVUS_ALIAS = "default"
-MILVUS_HOST = "localhost"      # TODO: change to your Milvus host / IP
-MILVUS_PORT = "19530"          # default port
-MILVUS_DB   = "default"        # database name
+MILVUS_HOST = os.getenv("MILVUS_HOST", _parsed_milvus_uri.hostname or "34.135.232.156")
+MILVUS_PORT = os.getenv("MILVUS_PORT", str(_parsed_milvus_uri.port or 19530))  # default port
+
 
 EMBEDDING_DIM = 768
 
@@ -44,7 +48,7 @@ def connect_milvus():
 
 def create_conv_recruiter():
     name = "conv_recruiter"
-    if Collection.exists(name, using=MILVUS_ALIAS):
+    if utility.has_collection(name, using=MILVUS_ALIAS):
         print(f"[{name}] already exists, skipping.")
         return
 
@@ -87,7 +91,7 @@ def create_conv_recruiter():
 
 def create_conv_candidate():
     name = "conv_candidate"
-    if Collection.exists(name, using=MILVUS_ALIAS):
+    if utility.has_collection(name, using=MILVUS_ALIAS):
         print(f"[{name}] already exists, skipping.")
         return
 
@@ -126,7 +130,7 @@ def create_conv_candidate():
 
 def create_applications():
     name = "applications"
-    if Collection.exists(name, using=MILVUS_ALIAS):
+    if utility.has_collection(name, using=MILVUS_ALIAS):
         print(f"[{name}] already exists, skipping.")
         return
 

@@ -98,6 +98,41 @@ JD_END_PATTERNS = [
     r"\bthanks\b",
     r"\bthank you\b",
 ]
+SKILL_SECTION_HINTS = [
+    "mandatory skills",
+    "requirements",
+    "requirement:",
+    "what we need to see",
+    "what you'll need",
+    "must have",
+    "nice to have",
+    "good to have",
+    "skills:",
+    "technical skills",
+]
+
+_SKILL_STOPWORDS = {
+    "strong", "background", "experience", "experiences", "knowledge", "skills",
+    "and", "or", "with", "using", "in", "of", "to", "for", "on", "the", "a", "an",
+    "good", "great", "solid", "hands-on", "handson", "ability", "abilities",
+    "etc", "etc.", "including", "include", "includes",
+}
+
+# Tokens we NEVER treat as skills (visa types, countries, raw numbers, etc.)
+_SKILL_BLOCKLIST = {
+    "h1b", "h4", "gc", "ead", "us", "ca",
+    "30", "60", "6", "6+", "months", "month",
+    "sme",
+}
+
+# Phrases that usually start vague, non-technical fragments
+_NON_SKILL_PREFIXES = {
+    "define", "develop", "drives", "drive", "downtimes", "downtime",
+    "growth", "plans", "plan", "problem", "service", "services",
+    "solution", "solutions", "compatibility", "expertise", "experience",
+    "validate", "prepare", "produce", "performs", "build", "builds",
+    "quarterly", "optimization", "optimize", "manage", "manages",
+}
 
 
 def extract_jd_block(text: str) -> str:
@@ -133,12 +168,9 @@ def extract_jd_block(text: str) -> str:
 
     jd_block = full[start_idx:end_idx].strip()
     return jd_block or full
-
+"""
 def extract_tools_from_jd(jd_text: str) -> List[str]:
-    """
-    Very simple heuristic to pull tool names out of a JD.
-    You can later replace this with an LLM call that fills a structured JD object.
-    """
+    
     if not jd_text:
         return []
 
@@ -156,6 +188,165 @@ def extract_tools_from_jd(jd_text: str) -> List[str]:
         if t not in seen:
             seen.add(t)
             unique.append(t)
+    return unique
+"""
+def find_new_skills_for_catalog(
+    jd_skills: List[str],
+    known_skills: Sequence[str],
+) -> List[str]:
+    """
+    Return skills that appear in the JD but are not in your existing catalog.
+    You can then persist these however you like (DB, JSON, etc.).
+    """
+    known = {s.strip().lower() for s in known_skills if s}
+    new: List[str] = []
+    for s in jd_skills:
+        key = s.strip().lower()
+        if key and key not in known and key not in new:
+            new.append(key)
+    return new
+
+def _clean_skill_phrase(raw: str) -> str:
+    # Normalize spacing and lower
+    txt = re.sub(r"\s+", " ", raw).strip().lower()
+    # Strip leading/trailing punctuation
+    txt = txt.strip(",.;:-/\\()[]{}")
+    if not txt:
+        return ""
+
+    # Pure numbers or tokens with no letters -> drop
+    if not any(ch.isalpha() for ch in txt):
+        return ""
+
+    # Blocklisted "skills" (visa types, raw nums, etc.)
+    if txt in _SKILL_BLOCKLIST:
+        return ""
+
+    # Split into words
+    words = txt.split()
+
+    # Too long → likely a sentence, not a skill
+    if len(words) > 6:
+        return ""
+
+    # If phrase starts with a verb/generic word, treat as non-skill
+    if words[0] in _NON_SKILL_PREFIXES:
+        return ""
+
+    # Remove trailing generic words
+    while words and words[-1] in _SKILL_STOPWORDS:
+        words.pop()
+    if not words:
+        return ""
+
+    cleaned = " ".join(words)
+
+    # Still blocklist / stopword after trimming?
+    if cleaned in _SKILL_STOPWORDS or cleaned in _SKILL_BLOCKLIST:
+        return ""
+
+    return cleaned
+
+
+
+def _extract_skill_candidates_from_sections(text: str) -> List[str]:
+    """
+    Pulls likely skills from JD sections that talk about 'Mandatory Skills',
+    'Requirements', 'What we need to see', etc.
+    """
+    skills: List[str] = []
+    lines = text.splitlines()
+
+    for line in lines:
+        lower = line.lower()
+        if any(hint in lower for hint in SKILL_SECTION_HINTS):
+            # Take part after ':' if present, else whole line
+            after = line.split(":", 1)[-1] if ":" in line else line
+            # Split on common separators
+            chunks = re.split(r"[,/•;]| and | AND ", after)
+            for chunk in chunks:
+                skill = _clean_skill_phrase(chunk)
+                if skill:
+                    skills.append(skill)
+    return skills
+
+
+def _extract_inline_acronyms_and_tools(text: str) -> List[str]:
+    """
+    Grab things like OSPF, BGP, MPLS, VXLAN, DMVPN, SR-TE, etc. anywhere in the JD.
+    """
+    skills = set()
+
+    # Acronyms / hyphenated tech tokens
+    for match in re.finditer(r"\b[A-Z0-9]{2,}(?:-[A-Z0-9]+)?\b", text):
+        token = match.group(0).strip()
+        # Avoid useless generic acronyms
+        if token in {"JD", "ADA"}:
+            continue
+        skills.add(token.lower())
+
+    # Known trigger words followed by something
+    # e.g. "experience with VMware", "knowledge of Kubernetes"
+    for m in re.finditer(
+        r"(experience|knowledge|skills)\s+(?:in|with|of)\s+([A-Za-z0-9+_.\- ]{2,40})",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        chunk = m.group(2)
+        skill = _clean_skill_phrase(chunk)
+        if skill:
+            skills.add(skill)
+
+    return list(skills)
+
+
+def extract_tools_from_jd(jd_text: str) -> List[str]:
+    """
+    Extract *all* reasonable skills from a JD:
+    - Start with dynamic extraction from sections ('Mandatory Skills', 'Requirements', etc.)
+    - Add inline acronyms/tools (OSPF, BGP, MPLS, VXLAN, VMware, etc.)
+    - Optionally also include hits from JD_TOOL_HINTS (if defined).
+    Result is a de-duplicated, ordered list and is NOT artificially limited to 5–7.
+    """
+    if not jd_text:
+        return []
+
+    # Keep original for regex that cares about case, but also a lowercase copy
+    raw = jd_text.strip()
+    lower = raw.lower()
+
+    found: List[str] = []
+
+    # 1) Dynamic section-based extraction
+    found.extend(_extract_skill_candidates_from_sections(raw))
+
+    # 2) Inline acronyms / technologies anywhere in the text
+    found.extend(_extract_inline_acronyms_and_tools(raw))
+
+    # 3) Optional: still leverage existing JD_TOOL_HINTS if you have it
+    #    (so synonyms like 'k8s' → 'kubernetes' still normalize)
+    try:
+        from recruiterbrain.shared_config import JD_TOOL_HINTS  # type: ignore[attr-defined]
+    except Exception:
+        JD_TOOL_HINTS = {}
+
+    for canonical, variants in getattr(JD_TOOL_HINTS, "items", lambda: [])():
+        if any(v in lower for v in variants):
+            found.append(canonical.lower())
+
+    # 4) Deduplicate while preserving order; drop very generic words
+    seen = set()
+    unique: List[str] = []
+    for t in found:
+        skill = _clean_skill_phrase(t)
+        if not skill:
+            continue
+        if skill in _SKILL_STOPWORDS:
+            continue
+        if skill not in seen:
+            seen.add(skill)
+            unique.append(skill)
+
     return unique
 
 def canonicalize_jd_tools(plan: Dict[str, Any]) -> None:
@@ -535,54 +726,56 @@ def _tools_match_line(
     total: int,
 ) -> str:
     """
-    Render per-tool icons PLUS an aggregate score/percent and missing tools summary.
+    Render a compact per-candidate skill summary:
 
-    required: canonical JD / query tools (lowercase).
-    normalized_tools: normalized tools set from normalize_tools(...).
-    weak_hits: mapping from required -> list of weak equivalents.
-    missing: list of required skills not covered (from coverage()).
-    total: total number of JD tools (len(required)).
+    - present/total and % match
+    - up to ~10 skills total (mix of present + missing)
+    - avoids huge ugly lines
     """
-    parts: List[str] = []
-
     norm_set = {t.lower().strip() for t in normalized_tools}
     missing_set = {m.lower().strip() for m in (missing or [])}
 
-    # --- Score & percent purely from coverage() output ---
+    # Total JD skills used for scoring
     total_skills = total or len(required) or 1
+
+    # Missing skills (pretty)
     missing_pretty = [_prettify_tool(m) for m in missing]
     covered = total_skills - len(missing_pretty)
     pct = round(covered / total_skills * 100)
 
-    # --- Per-tool icons aligned with the same notion of "missing" ---
+    # Partition required into present vs absent (using coverage's "missing")
+    present_tokens: List[str] = []
+    absent_tokens: List[str] = []
+
     for token in required:
         key = token.lower().strip()
         pretty = _prettify_tool(token)
 
         if key in missing_set:
-            # Coverage says this JD skill is not satisfied
-            parts.append(f"❌ {pretty}")
-            continue
-
-        # Not in missing -> coverage says it IS satisfied (strong or weak)
-        if key in norm_set:
-            parts.append(f"✅ {pretty}")
-        elif weak_hits.get(token):
-            alts = "/".join(_prettify_tool(t) for t in weak_hits[token])
-            parts.append(f"⚠️ {pretty} (~{alts})")
+            # JD says required, coverage says missing
+            absent_tokens.append(pretty)
         else:
-            # Coverage says present but we don't see the exact token – still treat as hit
-            parts.append(f"✅ {pretty}")
+            # Treat as covered (strong or weak)
+            present_tokens.append(pretty)
 
-    suffix = f" (Score: {covered}/{total_skills}; {pct}% match"
-    if missing_pretty:
-        truncated_missing = ", ".join(missing_pretty[:4])
-        if len(missing_pretty) > 4:
-            truncated_missing += ", …"
-        suffix += f"; Missing: {truncated_missing}"
-    suffix += ")"
+    # Limit how many skills we show (for readability)
+    max_total_display = 10
+    max_present = max_total_display // 2  # e.g. 5
+    max_absent = max_total_display - max_present  # e.g. 5
 
-    return ", ".join(parts) + suffix
+    present_display = present_tokens[:max_present]
+    absent_display = absent_tokens[:max_absent]
+
+    present_str = ", ".join(f"✅ {p}" for p in present_display) if present_display else "None"
+    absent_str = ", ".join(f"❌ {a}" for a in absent_display) if absent_display else "None"
+
+    line = (
+        f"{covered}/{total_skills} skills matched ({pct}% match). "
+        f"Present: {present_str}. "
+        f"Missing: {absent_str}"
+    )
+
+    return line
 
 
 def _is_greeting(text: str) -> bool:
@@ -865,6 +1058,15 @@ def llm_plan(question: str) -> Dict[str, Any]:
 
         merged.sort()
         plan["required_tools"] = merged
+        try:
+            from recruiterbrain.shared_config import SKILL_CATALOG  # e.g. a list of known skills
+        except Exception:
+            SKILL_CATALOG = []
+
+        new_skills = find_new_skills_for_catalog(jd_tools, SKILL_CATALOG)
+        if new_skills:
+            logger.info("New JD skills to add to catalog: %s", ", ".join(new_skills))
+            # TODO: append to your DB / JSON / Notion / wherever you store skills
 
         # For JD flows, make sure it's insight with a sane top N
         plan["intent"] = "insight"
@@ -973,6 +1175,17 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
                     seen.add(t_norm)
                     merged.append(t_norm)
             plan["required_tools"] = merged
+            # OPTIONAL: discover new skills from this JD and log them
+            try:
+                 from recruiterbrain.shared_config import SKILL_CATALOG
+            except Exception:
+              SKILL_CATALOG = []
+
+            new_skills = find_new_skills_for_catalog(jd_tools, SKILL_CATALOG)
+            if new_skills:
+              logger.info("New JD skills to add to catalog: %s", ", ".join(new_skills))
+            # TODO: persist new_skills somewhere durable
+
     else:
         # Normal question: remove contact/meta words BEFORE embedding.
         cleaned_for_embed = strip_contact_meta_phrases(original_question)
@@ -1228,9 +1441,12 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     if formatted_rows:
         table_lines = ["Candidate\tTools Match\tNotes"]
         for row in formatted_rows[:return_top]:
-            table_lines.append(
-                f"{row.get('candidate','Unknown')}\t{row.get('tools_match','')}\t{row['notes']}"
-            )
+             table_lines.append(
+             f"{row.get('candidate','Unknown')}\t"
+             f"{row.get('position','')}\t"
+             f"{row.get('tools_match','')}\t"
+             f"{row['notes']}"
+        )
         body = "\n".join(table_lines)
         if show_contacts:
             contact_lines = ["", "Contacts:"]
