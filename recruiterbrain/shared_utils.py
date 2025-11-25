@@ -445,6 +445,27 @@ def classify_primary_gap(
 
     return "none"
 
+
+def _normalize_field_to_list(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        # Try to parse "['HL7', 'HIPAA']" style
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = ast.literal_eval(s)
+                if isinstance(parsed, list):
+                    return [str(x) for x in parsed]
+            except Exception:
+                pass
+        # Fallback: comma-separated string
+        return [v.strip() for v in s.split(",") if v.strip()]
+    # anything else
+    return [str(value)]
+
 def build_gap_explanation(
     entity: Dict[str, Any],
     jd_text: str,
@@ -468,13 +489,17 @@ def build_gap_explanation(
     missing_pretty = [t for t in missing_tools][:3]
 
     # Candidate context
-    cand_domains = entity.get("domains_of_expertise") or []
-    cand_domains_str = ", ".join(cand_domains[:3])
-    cand_primary_industry = entity.get("primary_industry") or ""
-    cand_tools = entity.get("skills_extracted") or []
-    if not cand_tools:
-        cand_tools = entity.get("tools_and_technologies") or []
+    cand_tools = _normalize_field_to_list(
+     entity.get("skills_extracted") or entity.get("tools_and_technologies")
+)
+    cand_domains = _normalize_field_to_list(entity.get("domains_of_expertise"))
+
     cand_tools_str = ", ".join(str(t) for t in cand_tools[:4])
+    cand_domains_str = ", ".join(str(d) for d in cand_domains[:3])
+
+    
+    cand_primary_industry = entity.get("primary_industry") or ""
+    
 
     parts: List[str] = []
 

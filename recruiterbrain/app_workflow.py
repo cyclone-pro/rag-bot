@@ -17,6 +17,7 @@ from recruiterbrain.shared_config import (
     TOP_K,
     VECTOR_FIELD_DEFAULT,
     get_openai_client,
+    
 )
 from recruiterbrain.shared_utils import (
     _norm, 
@@ -61,6 +62,10 @@ CONTACT_PHRASES = [
     "share phone numbers",
     "share contacts",
     "give info",
+    "get me their contacts",
+    "get me their contact",
+    "get their contacts",
+    "get their contact",
 ]
 JD_TOOL_HINTS = {
     "python": ["python"],
@@ -84,6 +89,10 @@ JD_TOOL_HINTS = {
     "spark": ["spark"],
     "bigquery": ["bigquery"],
     "vertex ai": ["vertex ai"],
+     "ci/cd": ["ci/cd", "ci-cd", "cicd"],
+    "terraform": ["terraform"],
+    "ansible": ["ansible"],
+    "power platform": ["power platform", "powerapps", "power apps"],
 }
 
 JD_START_PATTERNS = [
@@ -118,7 +127,15 @@ _SKILL_STOPWORDS = {
     "strong", "background", "experience", "experiences", "knowledge", "skills",
     "and", "or", "with", "using", "in", "of", "to", "for", "on", "the", "a", "an",
     "good", "great", "solid", "hands-on", "handson", "ability", "abilities",
-    "etc", "etc.", "including", "include", "includes",
+    "etc", "etc.", "including", "include", "includes", "get", "gets", "getting", "got",
+    "have", "has", "having", "had",
+    "make", "made", "making",
+    "take", "taking", "taken",
+    "do", "does", "did",
+    "also",
+    "me", "my", "our", "your", "his", "her", "its",
+    "they", "them", "their", "theirs",
+    "we", "you",
 }
 
 # Tokens we NEVER treat as skills (visa types, countries, junky words, etc.)
@@ -138,6 +155,7 @@ _SKILL_BLOCKLIST = {
     "manager", "lead", "owner",
     # misc
     "fth", "fte",
+     "est", "pst", "cst", "mst", "ist", "gmt", "utc",
 }
 
 # Phrases that usually start vague, non-technical fragments
@@ -239,6 +257,7 @@ def _clean_skill_phrase(raw: str) -> str:
         words.pop(0)
     if not words:
         return ""
+    
 
     # If starts with a generic verb / vague prefix -> treat as non-skill
     if words[0] in _NON_SKILL_PREFIXES:
@@ -260,6 +279,8 @@ def _clean_skill_phrase(raw: str) -> str:
          return ""
     if lower in {"d2d", "d2d:", "day to day"}:
          return ""
+    if words[-1] == "solutions":
+        return ""
 
     # Drop location-style tokens
     # 'nyc', 'nj', 'ny', state codes, etc.
@@ -487,6 +508,17 @@ def _extract_inline_acronyms_and_tools(text: str) -> List[str]:
         skill = _clean_skill_phrase(chunk)
         if skill:
             skills.add(skill)
+    for m in re.finditer(
+        r"(?:such as|like)\s+([A-Za-z0-9+_.\- ,]{2,80})",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        chunk = m.group(1)
+        # split on commas
+    for piece in re.split(r"[,/]| and ", chunk):
+            skill = _clean_skill_phrase(piece)
+            if skill:
+                 skills.add(skill)
 
     return list(skills)
 
@@ -703,6 +735,8 @@ def strip_contact_meta_phrases(text: str) -> str:
     for phrase in CONTACT_PHRASES:
         # simple case-insensitive removal
         cleaned = re.sub(re.escape(phrase), "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bget\s+me\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\btheir\s+contacts?\b", "", cleaned, flags=re.IGNORECASE)
     # normalize extra spaces
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
@@ -1812,34 +1846,39 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     logger.debug("Cached insight result with %d rows", len(formatted_rows))
 
     if formatted_rows:
-        table_lines = ["Candidate\tTools Match\tNotes"]
+        table_lines = ["Candidate\tPosition\tTools Match\tNotes"]
         for row in formatted_rows[:return_top]:
-             table_lines.append(
-             f"{row.get('candidate','Unknown')}\t"
-             f"{row.get('position','')}\t"
-             f"{row.get('tools_match','')}\t"
-             f"{row['notes']}"
-              + "-" * 60
-                + "\n"
-        )
-        body = "\n".join(table_lines)
-        if show_contacts:
-            contact_lines = ["", "Contacts:"]
-            for row in formatted_rows[:return_top]:
+            # Base candidate line
+            line = (
+                f"{row.get('candidate', 'Unknown')}\t"
+                f"{row.get('position', '')}\t"
+                f"{row.get('tools_match', '')}\t"
+                f"{row.get('notes', '')}"
+            )
+
+            # If user asked for contacts, append them directly beneath this candidate
+            if show_contacts:
                 contacts = row.get("contacts") or {}
-                if not contacts.get("linkedin_url") and not contacts.get("email"):
-                    continue
-                name = row.get("candidate", "Candidate")
-                parts = [name]
+                contact_bits = []
                 if contacts.get("linkedin_url"):
-                    parts.append(f"LinkedIn: {contacts['linkedin_url']}")
+                    contact_bits.append(f"LinkedIn: {contacts['linkedin_url']}")
                 if contacts.get("email"):
-                    parts.append(f"Email: {contacts['email']}")
-                contact_lines.append(" - ".join(parts))
-            if len(contact_lines) > 2:
-                body += "\n" + "\n".join(contact_lines)
+                    contact_bits.append(f"Email: {contacts['email']}")
+                if contacts.get("phone"):
+                    contact_bits.append(f"Phone: {contacts['phone']}")
+
+                if contact_bits:
+                    # Add a newline and indent contacts under the candidate
+                    line += "\n    " + " | ".join(contact_bits)
+
+            # Separator line after each candidate
+            line += "\n" + "-" * 60
+            table_lines.append(line)
+
+        body = "\n".join(table_lines)
     else:
         body = "No ranked candidates qualified under the current criteria."
+
 
     header = f"Total matched: {total_matches}"
     extras = [msg for msg in (scarcity_msg, dq_banner) if msg]
