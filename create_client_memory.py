@@ -128,7 +128,7 @@ def insert_example(coll: Collection):
         "searches_count": 0,
         "desired_headcount": 0,
         "status": "Active",
-        "cm_dummy_vec": [0.0, 0.0],   # required
+        "cm_dummy_vec": [0.0, 0.0],   
     }
     insert_one(coll, row)
     coll.flush()

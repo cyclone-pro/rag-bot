@@ -19,6 +19,7 @@ from recruiterbrain.shared_config import (
     get_openai_client,
     
 )
+from rapidfuzz import process, fuzz
 from recruiterbrain.shared_utils import (
     _norm, 
     brief_why,
@@ -135,7 +136,27 @@ _SKILL_STOPWORDS = {
     "also",
     "me", "my", "our", "your", "his", "her", "its",
     "they", "them", "their", "theirs",
-    "we", "you",
+    "we", "you","cloud", 
+}
+TECH_HINTS = {
+    # clouds
+    "aws", "azure", "gcp", "google cloud", "google-cloud",
+    # data / ml / platform
+    "kafka", "spark", "dbt", "snowflake", "databricks",
+    "airflow", "kubernetes", "k8s", "docker", "terraform", "ansible", "jenkins",
+    "github", "gitlab", "git", "gitactions", "github actions", "gitlab ci",
+    # languages
+    "python", "java", "javascript", "typescript", "go", "golang", "c", "c++",
+    "csharp", "c#", "ruby", "rails", "ruby on rails", "perl", "shell",
+    # app frameworks
+    "django", "flask", "fastapi", "spring", "spring boot", "nodejs", "node",
+    "react", "angular", "vue",
+    # networking / infra
+    "cisco", "aci", "nxos", "ios", "arista", "juniper",
+    "palo", "palo alto", "fortinet", "checkpoint", "f5",
+    "bgp", "ospf", "isis", "mpls", "vxlan", "evpn",
+    "vmware", "vsphere", "esxi", "nutanix", "ahv", "olvm",
+    "rhel", "active directory", "sccm", "intune", "dns", "dhcp",
 }
 
 # Tokens we NEVER treat as skills (visa types, countries, junky words, etc.)
@@ -182,6 +203,22 @@ US_STATE_CODES = {
     "me","md","ma","mi","mn","ms","mo","mt","ne","nv","nh","nj","nm","ny","nc","nd","oh","ok",
     "or","pa","ri","sc","sd","tn","tx","ut","vt","va","wa","wv","wi","wy"
 }
+NON_SKILL_PATTERNS = [
+    r"\byears?\b",
+    r"\brate\b",
+    r"\bper\s+hour\b",
+    r"\b(w2|c2c)\b",
+    r"\bremote\b",
+    r"\bonsite\b",
+    r"\bhybrid\b",
+    r"\blocat(?:ed|ion)\b",
+    r"\bvisa\b",
+    r"\bany\s+work\s+auth\b",
+    r"\baccording to\b",
+    r"\bclient\b",
+    r"\b12\s*month(?:s)?\b",
+]
+
 
 def _clean_skill_phrase(raw: str) -> str:
     # Normalize spacing
@@ -235,6 +272,11 @@ def _clean_skill_phrase(raw: str) -> str:
     # Normalize punctuation at edges
     txt = txt.strip(",.;:-/\\()[]{}")
     lower = txt.lower()
+    for pat in NON_SKILL_PATTERNS:
+     if re.search(pat, lower):
+         return ""
+
+
     if not txt:
         return ""
 
@@ -284,6 +326,12 @@ def _clean_skill_phrase(raw: str) -> str:
 
     # Drop location-style tokens
     # 'nyc', 'nj', 'ny', state codes, etc.
+        # At this point we have a short phrase. If it’s 2–3 words and none of them
+    # look like a tech keyword, it’s probably fluff like "excellent working".
+    if 2 <= len(words) <= 3:
+        if not any(w in TECH_HINTS for w in words):
+            return ""
+
     tok = lower.replace(".", "")
     if tok in US_STATE_CODES or tok in {"nyc", "nj", "ny"}:
          return ""
@@ -316,14 +364,7 @@ def _clean_skill_phrase(raw: str) -> str:
         "optimize", "optimizing", "tune", "tuning",
     }
 
-    TECH_HINTS = {
-        "ai", "ml", "nlp", "llm", "genai", "gen", "gen ai",
-        "python", "r", "sql", "oracle", "snowflake", "mongodb",
-        "spark", "hadoop", "kafka", "dbt", "airflow",
-        "azure", "aws", "openai", "openai api", "azure openai",
-        "salesforce", "service", "cloud", "service cloud",
-        "etl", "warehouse", "warehousing", "data",
-    }
+    
 
     if any(w in SOFT_MID_WORDS for w in words) and not any(
         w in TECH_HINTS for w in words
@@ -396,28 +437,7 @@ def extract_jd_block(text: str) -> str:
 
     jd_block = full[start_idx:end_idx].strip()
     return jd_block or full
-"""
-def extract_tools_from_jd(jd_text: str) -> List[str]:
-    
-    if not jd_text:
-        return []
 
-    text = jd_text.lower()
-    found: List[str] = []
-
-    for canonical, variants in JD_TOOL_HINTS.items():
-        if any(v in text for v in variants):
-            found.append(canonical)
-
-    # Deduplicate while preserving order
-    seen = set()
-    unique = []
-    for t in found:
-        if t not in seen:
-            seen.add(t)
-            unique.append(t)
-    return unique
-"""
 def find_new_skills_for_catalog(
     jd_skills: List[str],
     known_skills: Sequence[str],
@@ -519,6 +539,13 @@ def _extract_inline_acronyms_and_tools(text: str) -> List[str]:
             skill = _clean_skill_phrase(piece)
             if skill:
                  skills.add(skill)
+    for m in re.finditer(r"(such as|like)\s+([A-Za-z0-9+_.\-/ ,]+)", text, flags=re.I):
+      items = re.split(r"[,/]| and ", m.group(2))
+      for piece in items:
+          skill = _clean_skill_phrase(piece)
+          if skill:
+              skills.add(skill)
+
 
     return list(skills)
 
@@ -737,6 +764,12 @@ def strip_contact_meta_phrases(text: str) -> str:
         cleaned = re.sub(re.escape(phrase), "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bget\s+me\b", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\btheir\s+contacts?\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bget me their contacts?\b", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bget me\b", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\btheir contacts?\b", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\btheir\b", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bresponsible for\b", "", cleaned, flags=re.I)
+
     # normalize extra spaces
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
@@ -1121,6 +1154,9 @@ def _augment_plan_with_heuristics(original_question: str, plan: Dict[str, Any]) 
 
     if "django" in text:
         add_kw("django")
+    if "backend developer" in text or "back-end developer" in text:
+         add_kw("backend")
+
 
     # Spring / Spring Boot variants
     if "spring boot" in text or "springboot" in text:
@@ -1154,22 +1190,10 @@ def _augment_plan_with_heuristics(original_question: str, plan: Dict[str, Any]) 
         add_domain("retail")
     if "government" in text or "public sector" in text:
         add_domain("government")
+    
 
     plan["require_domains"] = domains
 
-"""
-def llm_plan(question: str) -> Dict[str, Any]:
-   
-    TEMP: bypass OpenAI planner and use a simple default plan
-    so we can debug Milvus + filtering first.
-    
-    plan = _default_plan(question)
-    # make sure question is included so embedding uses it
-    plan["question"] = question
-    logger.info("Using default plan (LLM disabled) for question='%s': %s", question, plan)
-    return plan
-
-"""
 
 def llm_plan(question: str) -> Dict[str, Any]:
     client = get_openai_client()
@@ -1491,7 +1515,7 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
         # Short friendly intro instead of hammering Milvus
         return (
             'Hey John how can i help you with! Ask me things like '
-            '"compare Milvus, dbt, AWS, Vertex AI" or "list top 10 healthcare candidates".'
+            '"get me 10 django candidates with Milvus, dbt, AWS, Vertex AI" or "list top 10 healthcare candidates".'
         )
 
     # --- Build or reuse a plan (LLM planner) ---
@@ -1640,21 +1664,17 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
                 base = render_candidate(entity, sim, detailed=False)
 
                 if show_contacts:
-                    contacts_bits: List[str] = []
+                    contact_block: List[str] = []
                     linkedin = entity.get("linkedin_url")
                     email = entity.get("email")
                     phone = entity.get("phone")
 
-                    if linkedin:
-                        name = entity.get("name") or f"Candidate {idx}"
-                        contacts_bits.append(f"LinkedIn: [{name}]({linkedin})")
-                    if email:
-                        contacts_bits.append(f"Email: {email}")
-                    if phone:
-                        contacts_bits.append(f"Phone: {phone}")
+                    if linkedin: contact_block.append(f"LinkedIn: {linkedin}")
+                    if email:    contact_block.append(f"Email: {email}")
+                    if phone:    contact_block.append(f"Phone: {phone}")
 
-                    if contacts_bits:
-                        base = base + " | " + " | ".join(contacts_bits)
+                    if contact_block:
+                      base = base + "\n    " + "\n    ".join(contact_block)
 
                 lines.append(f"{idx}. {base}")
 

@@ -41,8 +41,9 @@ METRIC: str = os.environ.get("RB_VECTOR_METRIC", "COSINE")
 EF_SEARCH: int = int(os.environ.get("RB_EF_SEARCH", "128"))
 EMBED_MODEL: str = os.environ.get("RB_EMBED_MODEL", os.environ.get("EMBED_MODEL_NAME", "intfloat/e5-base-v2"))
 OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_API_KEY: Optional[str] = os.environ.get("OPENAI_API_KEY",[])
-logger.info("OPENAI_API_KEY present? %s", bool(OPENAI_API_KEY))
+OPENAI_API_KEY: Optional[str] = os.environ.get("OPENAI_API_KEY") or None
+
+
 
 # --------------------------- Insight configuration ------------------------ #
 INSIGHT_DEFAULT_K: int = int(os.environ.get("INSIGHT_DEFAULT_K", "25"))

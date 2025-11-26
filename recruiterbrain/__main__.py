@@ -5,9 +5,12 @@ import argparse
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+import time
+import json
 
-from fastapi import Body, FastAPI, HTTPException, Request
+
+from fastapi import Body, FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -15,6 +18,8 @@ from fastapi.templating import Jinja2Templates
 
 from recruiterbrain.env_loader import load_env
 from recruiterbrain.logging_config import configure_logging
+from recruiterbrain.shared_config import get_encoder, get_milvus_client
+
 
 load_env()
 configure_logging()
@@ -48,6 +53,56 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+try:
+    _ = get_milvus_client()
+    _ = get_encoder()
+    logger.info("Warmup: Milvus client and encoder loaded")
+except Exception as exc:
+    logger.warning("Warmup failed (will lazy-load on demand): %s", exc)
+    
+# ---- Tiny in-memory cache for identical questions ----
+_CHAT_CACHE: Dict[str, ChatResponse] = {}
+_CHAT_CACHE_MAX = 200  # cap to avoid unbounded growth
+def _chat_cache_key(chat_input: ChatRequest) -> str:
+    return json.dumps(
+        {
+            "q": chat_input.question.strip(),
+            "tools": chat_input.required_tools or [],
+            "filters": chat_input.filters or {},
+            "show_contacts": chat_input.show_contacts,
+        },
+        sort_keys=True,
+    )
+
+# ---- Simple in-process rate limiting ----
+# For prod you’d back this with Redis / Memorystore.
+
+_RATE_LIMIT_STATE: Dict[str, Tuple[float, int]] = {}
+_RATE_WINDOW_SECONDS = 60.0          # 1-minute window
+_RATE_MAX_REQUESTS = 30              # 30 requests / minute / IP
+
+
+def _rate_key(request: Request) -> str:
+    # For now, use client IP; later you can swap this for user_id / API key
+    return request.client.host or "unknown"
+
+
+def rate_limiter(request: Request) -> None:
+    now = time.time()
+    key = _rate_key(request)
+    window_start, count = _RATE_LIMIT_STATE.get(key, (now, 0))
+
+    # New window
+    if now - window_start > _RATE_WINDOW_SECONDS:
+        _RATE_LIMIT_STATE[key] = (now, 1)
+        return
+
+    # Existing window
+    if count >= _RATE_MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again soon.")
+
+    _RATE_LIMIT_STATE[key] = (window_start, count + 1)
+
 
 
 class ChatRequest(BaseModel):
@@ -97,7 +152,9 @@ def _normalize_required_tools(tools: Optional[List[str]]) -> List[str]:
         text = str(tool).strip().lower()
         if text and text not in normalized:
             normalized.append(text)
-    return normalized
+
+    MAX_CORE_TOOLS = 25
+    return normalized[:MAX_CORE_TOOLS]
 
 
 def _build_insight_response(text: str) -> InsightResponse:
@@ -118,7 +175,11 @@ def home(request: Request):
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat_endpoint(chat_input: ChatRequest) -> Dict[str, Optional[str]] | JSONResponse:
+def chat_endpoint(chat_input: ChatRequest,_: None = Depends(rate_limiter),) -> Dict[str, Optional[str]] | JSONResponse:
+    key = _chat_cache_key(chat_input)
+    if key in _CHAT_CACHE:
+         logger.debug("Chat cache hit")
+         return _CHAT_CACHE[key].model_dump()
     question = chat_input.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Please enter a question.")
@@ -157,11 +218,16 @@ def chat_endpoint(chat_input: ChatRequest) -> Dict[str, Optional[str]] | JSONRes
             status_code=500,
             content=ChatResponse(error=str(exc)).model_dump(),
         )
+    resp = ChatResponse(answer=answer)
+    if len(_CHAT_CACHE) >= _CHAT_CACHE_MAX:
+        # naive eviction: clear everything when full
+        _CHAT_CACHE.clear()
+    _CHAT_CACHE[key] = resp
     return ChatResponse(answer=answer).model_dump()
 
 
 @app.post("/insight", response_model=InsightResponse)
-def insight_endpoint(payload: InsightRequest) -> Dict[str, Any]:
+def insight_endpoint(payload: InsightRequest,_: None = Depends(rate_limiter),) -> Dict[str, Any]:
     question = payload.question.strip()
     logger.info("Insight request received (filters=%s, tools=%s)", payload.filters is not None, payload.required_tools)
     plan = llm_plan(question)

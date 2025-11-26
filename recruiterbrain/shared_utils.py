@@ -210,6 +210,14 @@ def _gather_text_fields(entity: Dict[str, Any], keys: List[str]) -> List[str]:
 
 
 def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
+    """
+    Collects all skills/tools/domains from key fields and canonicalizes them into a
+    normalized set used for JD coverage.
+
+    Important: we add canonical tags like 'aws', 'azure', 'hipaa', etc. whenever
+    they appear inside longer phrases such as 'aws developer', 'aws solutions architect',
+    'hipaa certified', etc.
+    """
     text_fields = _gather_text_fields(
         entity,
         [
@@ -218,8 +226,9 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
             "domains_of_expertise",
             "primary_industry",
             "sub_industries",
-            "keywords_summary",   
+            "keywords_summary",
             "semantic_summary",
+            "certifications",
         ],
     )
 
@@ -233,14 +242,65 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
             if piece:
                 raw_tokens.append(piece)
 
-    raw_lower = [_norm(token) for token in raw_tokens]
-    normalized = set(raw_lower)
+    normalized: set[str] = set()
+
+    for token in raw_tokens:
+        if not token:
+            continue
+        s = _norm(token)  # typically lower + strip
+        if not s:
+            continue
+
+        # --- Canonicalization block: add short "core" tags from longer phrases ---
+
+        # Clouds
+        if "aws" in s:
+            normalized.add("aws")
+        if "azure" in s:
+            normalized.add("azure")
+        if "gcp" in s or "google cloud" in s:
+            normalized.add("gcp")
+
+        # Security / compliance
+        if "hipaa" in s:
+            normalized.add("hipaa")
+        if "soc2" in s or "soc 2" in s:
+            normalized.add("soc2")
+
+        # Backend role (helps for queries like "backend developer")
+        if "backend" in s and "developer" in s:
+            normalized.add("backend")
+
+        # Databases / data platforms
+        if "snowflake" in s:
+            normalized.add("snowflake")
+        if "redshift" in s:
+            normalized.add("redshift")
+
+        # DevOps / IaC
+        if "terraform" in s:
+            normalized.add("terraform")
+        if "ansible" in s:
+            normalized.add("ansible")
+        if "kubernetes" in s or "k8s" in s:
+            normalized.add("kubernetes")
+
+        # Finally add the full normalized token itself
+        normalized.add(s)
+        # TEMP DEBUG
+    
+    if entity.get("name") == "Peyton Gonzalez":
+        print("RAW TOKENS:", raw_tokens)
+        print("AFTER _norm:", [ _norm(t) for t in raw_tokens ])
+        print("FINAL normalized:", normalized)
+
 
     ctx = {
         "raw_tools": text_fields,
         "normalized_tools": list(normalized),
     }
     return normalized, ctx
+
 
 def coverage(required_tools: List[str], normalized_tools: set[str]) -> Tuple[int, List[str], Dict[str, List[str]]]:
     """
