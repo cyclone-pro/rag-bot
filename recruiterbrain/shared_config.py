@@ -289,15 +289,10 @@ BRAND_ALIASES: Dict[str, str] = {
     "shell scripting": "bash",
     "chocolatey": "chocolatey",
     "ansible tower": "ansible",
-    "ospf": ["ospf"],
-    "bgp": ["bgp", "eigrp", "isis", "pim multicast"],
-    "mpls": ["mpls", "sr-te"],
-    "vxlan": ["vxlan", "bgp-mp", "vrf", "vrfs"],
-    "vmware": ["vmware", "esxi", "vsphere"],
-    "linux": ["linux"],
-    "windows": ["windows server", "windows"],
-    "arista": ["arista os"],
-    "cisco ios": ["cisco ios"],
+    "ospf": "ospf",
+    "linux": "linux",
+    "arista": "arista os",
+    "cisco ios": "cisco ios",
 }
 
 # Back-compat: keep old name for existing imports/usages
@@ -342,67 +337,7 @@ CATEGORY_SYNONYMS: Dict[str, str] = {
     "analytics warehouse": "data_warehouse",
     "analytical db": "data_warehouse",
 
-     # Networking
-    "network_routing": ["cisco ios", "cisco nx-os", "juniper junos", "arista eos", "sonic"],
-    "network_switching": ["cisco ios", "cisco nx-os", "juniper junos", "arista eos"],
-    "network_routing_switching": ["cisco ios", "cisco nx-os", "juniper junos", "arista eos"],
-    "network_mpls": ["cisco ios", "cisco nx-os", "juniper junos"],
-    "network_overlay": ["cisco nx-os", "juniper junos", "arista eos", "sonic"],
-    "network_sdwan": ["cisco viptela", "cisco meraki", "versa"],
-    "network_load_balancer": ["f5", "netscaler", "cisco"],
-    "network_firewall": ["palo alto", "fortinet fortigate", "checkpoint", "cisco"],
-    "network_vpn": ["palo alto", "fortinet fortigate", "checkpoint", "cisco"],
-
-    # DevOps
-    "devops_cicd": ["jenkins", "github actions", "gitlab ci", "circleci", "argo cd", "flux"],
-    "devops_iac": ["terraform", "ansible", "chef", "puppet", "saltstack"],
-    "devops_config_mgmt": ["ansible", "chef", "puppet", "saltstack"],
-    "devops_observability": ["prometheus", "grafana", "datadog", "new relic", "splunk observability", "elastic apm"],
-
-    # Cybersecurity
-    "security_endpoint": ["crowdstrike", "sentinelone", "microsoft defender"],
-    "security_siem": ["splunk", "splunk es", "qradar", "arcsight", "elk", "wazuh"],
-    "security_operations": ["splunk", "qradar", "elk", "wazuh"],
-    "security_iam": ["okta", "azure ad", "ping identity"],
-    "security_pam": ["cyberark"],
-    "security_zero_trust": ["palo alto", "okta", "azure ad"],
-
-    # ML / AI / DS
-    "ml_general": ["scikit-learn", "xgboost", "lightgbm"],
-    "ml_deep_learning": ["pytorch", "tensorflow", "keras"],
-    "ml_feature_engineering": ["pandas", "numpy", "scikit-learn"],
-    "ml_deployment": ["vertex ai", "amazon sagemaker", "azure machine learning", "mlflow"],
-    "ml_monitoring": ["mlflow", "datadog", "prometheus"],  # rough but useful
-    "ml_ops": ["mlflow", "vertex ai", "amazon sagemaker", "azure machine learning"],
-
-    "ds_general": ["pandas", "numpy", "scipy", "jupyter"],
-    "ds_eda": ["pandas", "numpy", "jupyter"],
-    "ds_viz": ["matplotlib", "seaborn", "plotly", "tableau", "power bi", "looker"],
-    "ds_bi": ["tableau", "power bi", "looker", "looker studio"],
-
-    # Fullstack / Web
-    "fullstack_web": ["django", "flask", "fastapi", "spring boot", "node.js", "express", "nestjs",
-                      "react", "next.js", "angular", "vue"],
-    "backend_web": ["django", "flask", "fastapi", "spring boot", "node.js", "express", "nestjs"],
-    "frontend_web": ["react", "next.js", "angular", "vue", "svelte"],
-
-    # Databases / Messaging
-    "db_relational": ["postgresql", "mysql", "mariadb", "sql server", "oracle database"],
-    "db_nosql": ["mongodb", "redis", "elasticsearch"],
-    "messaging_queue": ["rabbitmq", "kafka"],
-    "messaging_streaming": ["kafka"],
-
-    # Infra / Virtualization / Endpoint mgmt
-    "infra_virtualization": ["vmware vsphere", "vmware esxi", "nutanix ahv"],
-    "infra_datacenter": ["vmware vsphere", "nutanix ahv", "rhel", "windows server"],
-    "infra_endpoint_mgmt": ["mecm", "intune", "wsus"],
-    "infra_backup": ["veeam", "commvault", "netbackup"],
-    "infra_config_baseline": ["mecm", "ansible"],
-
-    "healthcare": ["healthcare it", "medical", "clinical", "ehr", "fhir", "hl7"],
-    "finance": ["financial services", "capital markets", "trading", "banking", "fintech"],
-    "logistics": ["supply chain", "transportation", "shipping", "fleet", "warehousing"],
-    "education": ["edtech", "online learning", "e-learning"],
+    
 }
 
 # Back-compat: old code may import DOMAIN_SYNONYMS; point it to categories
@@ -487,6 +422,7 @@ CATEGORY_EQUIVALENTS: Dict[str, List[str]] = {
     "infra_endpoint_mgmt": ["mecm", "intune", "wsus"],
     "infra_backup": ["veeam", "commvault", "netbackup"],
     "infra_config_baseline": ["mecm", "ansible"],
+    
 }
 INDUSTRY_SYNONYMS = {
     "Logistics": ["Supply Chain", "Transportation", "Shipping", "Delivery"],
@@ -678,6 +614,13 @@ def get_openai_client() -> Optional[OpenAI]:
         return None
     logger.debug("Instantiating OpenAI client for model %s", OPENAI_MODEL)
     return OpenAI(api_key=OPENAI_API_KEY)
+BRAND_TO_CATEGORIES: Dict[str, Set[str]] = {}
+for cat, brands in CATEGORY_EQUIVALENTS.items():
+    for b in brands:
+        BRAND_TO_CATEGORIES.setdefault(b, set()).add(cat)
+
+
+
 
 __all__ = [
     # Core env/config
@@ -709,6 +652,7 @@ __all__ = [
     "WEAK_EQUIVALENTS",
     "ALIAS_MAP",          # back-compat alias -> BRAND_ALIASES
     "DOMAIN_SYNONYMS",    # back-compat alias -> CATEGORY_SYNONYMS
+    "BRAND_TO_CATEGORIES",
 
     # Clients
     "get_encoder",

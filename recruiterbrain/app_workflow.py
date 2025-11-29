@@ -17,9 +17,15 @@ from recruiterbrain.shared_config import (
     TOP_K,
     VECTOR_FIELD_DEFAULT,
     get_openai_client,
+    WEAK_EQUIVALENTS, 
+    BRAND_TO_CATEGORIES,
     
 )
-from rapidfuzz import process, fuzz
+try:
+    from rapidfuzz import process, fuzz
+except ImportError:  # pragma: no cover
+    process = None
+    fuzz = None
 from recruiterbrain.shared_utils import (
     _norm, 
     brief_why,
@@ -95,6 +101,165 @@ JD_TOOL_HINTS = {
     "ansible": ["ansible"],
     "power platform": ["power platform", "powerapps", "power apps"],
 }
+# ----------------- Fuzzy skill & role catalogs (canonical mapping) ----------------- #
+
+# Canonical skills -> common variants / misspellings / abbreviations
+CANONICAL_SKILLS: Dict[str, List[str]] = {
+    # Languages
+    "python": ["python", "pyhton", "pyton"],
+    "java": ["java", "jaav", "jave"],
+    "c": ["c"],
+    "c++": ["c++", "cpp"],
+    "c#": ["c#", "c sharp", "csharp"],
+    "javascript": ["javascript", "js", "javscript", "javasript"],
+    "typescript": ["typescript", "ts", "typesript"],
+    "go": ["go", "golang"],
+    "ruby": ["ruby", "rubby"],
+    "ruby on rails": ["ruby on rails", "ror", "rails"],
+    "php": ["php"],
+
+    # Backend frameworks
+    "django": ["django", "djanog"],
+    "flask": ["flask"],
+    "fastapi": ["fastapi", "fast api"],
+    "spring": ["spring"],
+    "spring boot": ["spring boot", "springboot", "spring-boot"],
+    "node.js": ["node.js", "nodejs", "node js"],
+    "express": ["express", "expressjs", "express js"],
+
+    # Frontend
+    "react": ["react", "reactjs", "react js"],
+    "angular": ["angular", "angularjs", "angular js"],
+    "vue": ["vue", "vuejs", "vue js"],
+
+    # Clouds
+    "aws": ["aws", "amazon web services", "amazone web services"],
+    "azure": ["azure", "microsoft azure"],
+    "gcp": ["gcp", "google cloud", "google cloud platform", "gogle cloud"],
+
+    # DevOps / infra
+    "docker": ["docker", "dockers"],
+    "kubernetes": ["kubernetes", "k8s", "kuberenetes", "kubernets"],
+    "terraform": ["terraform", "terrafrom", "terrafom"],
+    "ansible": ["ansible", "ansibl"],
+    "jenkins": ["jenkins", "jenknis"],
+    "github actions": ["github actions", "git hub actions", "gitactions"],
+    "gitlab ci": ["gitlab ci", "gitlab-ci"],
+    "circleci": ["circleci"],
+    "argo cd": ["argo cd", "argo-cd"],
+    "helm": ["helm", "helm chart"],
+
+    # Data / DB / big data
+    "sql": ["sql", "sequel"],
+    "postgresql": ["postgresql", "postgres", "postgre", "postgress"],
+    "mysql": ["mysql", "my sql"],
+    "mongodb": ["mongodb", "mongo db"],
+    "redis": ["redis"],
+    "snowflake": ["snowflake", "snowflak"],
+    "databricks": ["databricks", "data bricks"],
+    "kafka": ["kafka", "kafak"],
+    "spark": ["spark", "pyspark"],
+    "airflow": ["airflow", "apache airflow"],
+
+    # Networking / security
+    "cisco": ["cisco", "ciscco"],
+    "cisco ios": ["cisco ios", "ios xe", "ios-xe"],
+    "cisco nx-os": ["cisco nx-os", "nx-os", "nexus os"],
+    "juniper junos": ["juniper junos", "junos"],
+    "arista eos": ["arista eos", "eos"],
+    "sonic": ["sonic", "mellanox sonic"],
+    "bgp": ["bgp"],
+    "ospf": ["ospf"],
+    "mpls": ["mpls"],
+    "vxlan": ["vxlan"],
+    "palo alto": ["palo alto", "paloalto", "pan-os"],
+    "fortinet fortigate": ["fortinet", "fortigate"],
+    "checkpoint": ["checkpoint", "check point"],
+    "f5": ["f5", "f5 ltm", "f5 gtm"],
+
+    # Systems / virtualization / infra
+    "vmware": ["vmware", "v mware"],
+    "vsphere": ["vsphere", "v sphere"],
+    "esxi": ["esxi"],
+    "nutanix": ["nutanix", "nutanix ahv"],
+    "olvm": ["olvm"],
+    "rhel": ["rhel", "red hat", "redhat"],
+    "linux": ["linux"],
+    "windows server": ["windows server", "win server"],
+    "active directory": ["active directory", "ad", "microsoft ad"],
+    "sccm": ["sccm", "mecm", "configmgr"],
+    "intune": ["intune"],
+    "dns": ["dns"],
+    "dhcp": ["dhcp"],
+
+    # Misc scripting
+    "powershell": ["powershell"],
+    "bash": ["bash", "shell scripting"],
+}
+
+# Canonical role families -> variants (titles)
+CANONICAL_ROLES: Dict[str, List[str]] = {
+    # SWE / SDE
+    "software engineer": [
+        "software engineer", "swe", "swe i", "swe ii", "swe iii",
+        "sde", "sde 1", "sde 2", "sde 3", "software developer",
+    ],
+    "backend engineer": [
+        "backend engineer", "back end engineer", "backend developer",
+        "server side engineer",
+    ],
+    "frontend engineer": [
+        "frontend engineer", "front end engineer", "frontend developer",
+        "ui engineer", "react developer", "reactjs developer",
+    ],
+    "fullstack engineer": [
+        "fullstack engineer", "full stack engineer", "fullstack developer",
+        "full stack developer",
+    ],
+
+    # QA / SDET
+    "sdet": ["sdet", "software development engineer in test"],
+    "qa engineer": ["qa engineer", "qa analyst", "quality engineer"],
+
+    # DevOps / platform
+    "devops engineer": [
+        "devops engineer", "dev ops engineer",
+        "site reliability engineer", "sre", "platform engineer",
+    ],
+
+    # Network / security
+    "network engineer": [
+        "network engineer", "network eng", "network specialist",
+        "network administrator",
+    ],
+    "network security engineer": [
+        "network security engineer", "security network engineer",
+        "firewall engineer",
+    ],
+
+    # Systems / infra
+    "systems engineer": [
+        "systems engineer", "system engineer",
+        "systems administrator", "system administrator",
+    ],
+}
+
+# Flatten catalogs → lists for rapidfuzz
+ALL_SKILL_VARIANTS: List[str] = []
+VARIANT_TO_CANON_SKILL: Dict[str, str] = {}
+for canon, variants in CANONICAL_SKILLS.items():
+    for v in variants:
+        v_low = v.lower()
+        ALL_SKILL_VARIANTS.append(v_low)
+        VARIANT_TO_CANON_SKILL[v_low] = canon
+
+ALL_ROLE_VARIANTS: List[str] = []
+VARIANT_TO_CANON_ROLE: Dict[str, str] = {}
+for canon, variants in CANONICAL_ROLES.items():
+    for v in variants:
+        v_low = v.lower()
+        ALL_ROLE_VARIANTS.append(v_low)
+        VARIANT_TO_CANON_ROLE[v_low] = canon
 
 JD_START_PATTERNS = [
     r"\btitle\s*:",               # Title: Python with Gen AI...
@@ -403,6 +568,68 @@ def _clean_skill_phrase(raw: str) -> str:
 
     return cleaned
 
+def _map_skill_to_canonical(skill: str) -> str:
+    """
+    Map a cleaned skill phrase to a canonical skill using fuzzy matching.
+    Returns the canonical skill or the original string if no good match.
+    """
+    s = (skill or "").lower().strip()
+    if not s:
+        return ""
+    # If rapidfuzz isn't available, just return cleaned skill
+
+    if process is None or fuzz is None:
+        return skill
+
+    # Exact / near-exact hit
+    if s in VARIANT_TO_CANON_SKILL:
+        return VARIANT_TO_CANON_SKILL[s]
+
+    if not ALL_SKILL_VARIANTS:
+        return skill
+
+    match = process.extractOne(
+        s,
+        ALL_SKILL_VARIANTS,
+        scorer=fuzz.WRatio,
+        score_cutoff=80,  # ignore weak matches
+    )
+    if not match:
+        return skill
+
+    best_variant, score, _ = match
+    canon = VARIANT_TO_CANON_SKILL.get(best_variant, skill)
+    return canon
+
+
+def _map_role_to_canonical(title: str) -> str:
+    """
+    Map a job title to a canonical role family (SWE, DevOps, Network, Systems, SDET...).
+    """
+    t = (title or "").lower().strip()
+    if not t:
+        return ""
+
+    if process is None or fuzz is None:
+        return ""
+
+    if t in VARIANT_TO_CANON_ROLE:
+        return VARIANT_TO_CANON_ROLE[t]
+
+    if not ALL_ROLE_VARIANTS:
+        return ""
+
+    match = process.extractOne(
+        t,
+        ALL_ROLE_VARIANTS,
+        scorer=fuzz.WRatio,
+        score_cutoff=78,
+    )
+    if not match:
+        return ""
+
+    best_variant, score, _ = match
+    return VARIANT_TO_CANON_ROLE.get(best_variant, "")
 
 def extract_jd_block(text: str) -> str:
     """
@@ -638,6 +865,125 @@ def canonicalize_jd_tools(plan: Dict[str, Any]) -> None:
 
     canonical.sort()
     plan["required_tools"] = canonical
+from recruiterbrain.shared_config import WEAK_EQUIVALENTS, BRAND_TO_CATEGORIES
+# WEAK_EQUIVALENTS: Dict[str, Set[str]]
+# BRAND_TO_CATEGORIES: Dict[str, Set[str]]  (you can build this in shared_config from CATEGORY_EQUIVALENTS)
+
+
+def _score_candidate_tools(
+    core_required: list[str],
+    nice_to_have: list[str],
+    candidate_tools: list[str],
+) -> dict[str, Any]:
+    """
+    Compute a nuanced match score between JD tools and candidate tools.
+
+    - core_required: MUST-have tools (canonicalized already)
+    - nice_to_have: NICE-to-have tools (canonicalized already)
+    - candidate_tools: normalized candidate skills/tools
+
+    For each core:
+      exact match      -> 1.0
+      weak equivalent  -> 0.4
+      category match   -> 0.2
+      no match         -> 0.0
+
+    For each nice-to-have:
+      exact match      -> 0.6
+      weak equivalent  -> 0.3
+      category match   -> 0.1
+
+    Final score is normalized to 0–100%.
+    """
+
+    core: list[str] = list(dict.fromkeys(core_required or []))  # dedupe, keep order
+    nice: list[str] = [t for t in dict.fromkeys(nice_to_have or []) if t not in core]
+
+    cand: set[str] = set((candidate_tools or []))
+
+    # Precompute candidate categories for cheap category matches
+    cand_categories: set[str] = set()
+    for c in cand:
+        for cat in BRAND_TO_CATEGORIES.get(c, set()):
+            cand_categories.add(cat)
+
+    core_scores: dict[str, float] = {}
+    nice_scores: dict[str, float] = {}
+
+    core_present: list[str] = []
+    core_missing: list[str] = []
+    nice_present: list[str] = []
+    nice_missing: list[str] = []
+
+    def _weak_match(jd_tool: str) -> bool:
+        # candidate has something that is a weak-equivalent to jd_tool, or vice versa
+        weak_set = WEAK_EQUIVALENTS.get(jd_tool, set())
+        if weak_set & cand:
+            return True
+        # also check reverse: candidate tools whose weak equivalents contain jd_tool
+        for c in cand:
+            if jd_tool in WEAK_EQUIVALENTS.get(c, set()):
+                return True
+        return False
+
+    def _category_match(jd_tool: str) -> bool:
+        jd_cats = BRAND_TO_CATEGORIES.get(jd_tool, set())
+        if not jd_cats or not cand_categories:
+            return False
+        return bool(jd_cats & cand_categories)
+
+    # Score core (must-have)
+    for t in core:
+        if t in cand:
+            core_scores[t] = 1.0
+            core_present.append(t)
+        elif _weak_match(t):
+            core_scores[t] = 0.4
+            core_missing.append(t)
+        elif _category_match(t):
+            core_scores[t] = 0.2
+            core_missing.append(t)
+        else:
+            core_scores[t] = 0.0
+            core_missing.append(t)
+
+    # Score nice-to-have
+    for t in nice:
+        if t in cand:
+            nice_scores[t] = 0.6
+            nice_present.append(t)
+        elif _weak_match(t):
+            nice_scores[t] = 0.3
+            nice_missing.append(t)
+        elif _category_match(t):
+            nice_scores[t] = 0.1
+            nice_missing.append(t)
+        else:
+            nice_scores[t] = 0.0
+            nice_missing.append(t)
+
+    # Aggregate
+    core_total_weight = float(len(core)) * 1.0
+    nice_total_weight = float(len(nice)) * 0.6
+
+    achieved = sum(core_scores.values()) + sum(nice_scores.values())
+    ideal = max(core_total_weight + nice_total_weight, 1e-9)
+
+    score_percent = round((achieved / ideal) * 100.0)
+
+    return {
+        "score_percent": score_percent,
+        "core_total": len(core),
+        "core_exact_matches": len([t for t, s in core_scores.items() if s >= 1.0]),
+        "core_nonzero_matches": len([t for t, s in core_scores.items() if s > 0.0]),
+        "core_present": core_present,
+        "core_missing": core_missing,
+        "nice_total": len(nice),
+        "nice_present": nice_present,
+        "nice_missing": nice_missing,
+        "core_scores": core_scores,
+        "nice_scores": nice_scores,
+    }
 
 def _default_plan(question: str) -> Dict[str, Any]:
     q = (question or "").lower()
@@ -945,13 +1291,14 @@ def _derive_required_tools(plan: Dict[str, Any]) -> List[str]:
             if token not in collected:
                 collected.append(token)
     return collected
+    """
 def _canonicalize_required_tools(required: List[str]) -> List[str]:
-    """
-    Final cleanup for required_tools:
-    - run through _clean_skill_phrase
-    - dedupe
-    - drop anything that doesn't survive cleaning
-    """
+    
+   " Final cleanup for required_tools: "
+   " - run through _clean_skill_phrase "
+    "- dedupe"
+   " - drop anything that doesn't survive cleaning"
+   
     cleaned: List[str] = []
     seen = set()
     for t in required or []:
@@ -964,6 +1311,37 @@ def _canonicalize_required_tools(required: List[str]) -> List[str]:
         cleaned.append(c)
     return cleaned
 
+"""
+def _canonicalize_required_tools(required: List[str]) -> List[str]:
+    """
+    Final cleanup for required_tools:
+
+    - run through _clean_skill_phrase
+    - fuzzy-map to canonical skills (python, spring boot, kubernetes, cisco ios, etc.)
+    - dedupe
+    - limit to a sane number for scoring
+    """
+    cleaned: List[str] = []
+    seen: set[str] = set()
+
+    for t in required or []:
+        # First do the heavy JD junk filtering
+        c = _clean_skill_phrase(t)
+        if not c:
+            continue
+
+        # Then fuzzy-map "springboot" -> "spring boot", "pyhton" -> "python", etc.
+        canon = _map_skill_to_canonical(c)
+        key = canon or c
+
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(key)
+
+    # Cap the number of core skills used for scoring so % match stays meaningful
+    MAX_CORE_TOOLS = 25
+    return cleaned[:MAX_CORE_TOOLS]
 
 def _route_insight(question: str) -> tuple[bool, float]:
     text = (question or "").lower()
@@ -1707,6 +2085,11 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
 
     for entity, sim in top_hits:
         tools, _ctx = normalize_tools(entity)
+        tool_match = _score_candidate_tools(
+            core_required=required,
+            nice_to_have=plan.get("nice_to_have_tools", []),
+            candidate_tools=tools,
+        )
         covered, missing, weak_hits = coverage(required, tools)
         for miss in missing:
             missing_counter[miss] = missing_counter.get(miss, 0) + 1
@@ -1718,7 +2101,8 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
                 "covered": covered,      # usually a set of matched tools
                 "missing": missing,      # list of required tools not present
                 "weak_hits": weak_hits,  # dict: required -> [equivalents]
-                "tools": tools,          # normalized tools for the candidate
+                "tools": tools,   # stash full scoring details 
+                "tool_match": tool_match,                    # normalized tools for the candidate
             }
         )
 
@@ -1745,18 +2129,27 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     # Should we include LinkedIn / email in the insight output?
     show_contacts = _should_show_contacts(original_question)
 
-    total_required = len(required) or 1
+    
     formatted_rows: List[Dict[str, Any]] = []
 
     for idx, entry in enumerate(final_entries):
         entity = entry["entity"]
         tools = entry["tools"]
-        missing_tokens = entry.get("missing") or []
         weak_hits = entry.get("weak_hits") or {}
 
-        # how many JD skills this candidate effectively covers
-        covered_count = total_required - len(missing_tokens)
+        # Use the precomputed fuzzy scoring (fallback if somehow missing)
+        tool_match = entry.get("tool_match") or _score_candidate_tools(
+            core_required=required,
+            nice_to_have=plan.get("nice_to_have_tools", []),
+            candidate_tools=tools,
+        )
+
+        total_required = tool_match["core_total"] or len(required) or 1
+        missing_tokens = tool_match["core_missing"]
+        covered_count = tool_match["core_exact_matches"]
+
         jd_text = plan.get("_jd_raw") or plan.get("question") or ""
+
 
         exp_comment = experience_gap_comment(jd_text, entity)
         has_experience_gap = exp_comment is not None
@@ -1785,6 +2178,10 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
             entity.get("employment_history"),
             entity.get("top_titles_mentioned"),
         )
+        canonical_role = _map_role_to_canonical(title)
+        entity["role_family_canonical"] = canonical_role
+
+
         position = render_position(entity.get("career_stage", ""), title)
         primary, secondary = select_industries(
             entity.get("primary_industry"),
