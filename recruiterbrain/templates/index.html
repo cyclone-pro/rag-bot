@@ -108,6 +108,35 @@
         color: var(--muted);
         font-size: 0.9rem;
       }
+
+      /* === Resume upload panel === */
+      .upload-panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 1rem 1.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      .upload-header {
+        font-weight: 600;
+        font-size: 0.95rem;
+      }
+      .upload-row {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .upload-row input[type="file"] {
+        flex: 1;
+        max-width: 320px;
+      }
+      .upload-hint {
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
     </style>
   </head>
   <body>
@@ -124,9 +153,27 @@
           </div>
         </div>
         <form id="chat-form">
-          <input id="question" type="text" placeholder="Type your question…" autocomplete="off" required />
+          <input
+            id="question"
+            type="text"
+            placeholder="Type your question…"
+            autocomplete="off"
+            required
+          />
           <button id="send" type="submit">Send</button>
         </form>
+      </section>
+
+      <!-- New: resume upload panel -->
+      <section class="upload-panel">
+        <div class="upload-header">Add candidate resume</div>
+        <div class="upload-row">
+          <input id="resume-file" type="file" accept=".pdf,.doc,.docx,.txt" />
+          <button id="upload-btn" type="button">Upload Resume</button>
+        </div>
+        <p class="upload-hint">
+          We’ll parse, embed the full resume, and index it into your Milvus <code>new_candidate_pool</code>.
+        </p>
       </section>
 
       <footer>Powered by Milvus + LLM planning.</footer>
@@ -137,6 +184,9 @@
       const input = document.getElementById("question");
       const messages = document.getElementById("messages");
       const sendBtn = document.getElementById("send");
+
+      const resumeInput = document.getElementById("resume-file");
+      const uploadBtn = document.getElementById("upload-btn");
 
       function addMessage(text, role) {
         const bubble = document.createElement("div");
@@ -168,6 +218,48 @@
         }
       }
 
+      async function uploadResume() {
+        const file = resumeInput.files[0];
+        if (!file) {
+          alert("Please choose a resume file first.");
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("source_channel", "Upload");
+
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = "Uploading…";
+
+        try {
+          const res = await fetch("/ingest_resume", {
+            method: "POST",
+            body: formData,
+          });
+          if (!res.ok) {
+            const msg = `Upload failed (HTTP ${res.status})`;
+            console.error(msg);
+            addMessage(msg, "bot");
+            return;
+          }
+          const data = await res.json();
+          const name = data.name || "Unknown name";
+          const cid = data.candidate_id || "unknown-id";
+          addMessage(
+            `✅ Resume ingested for ${name} (candidate_id: ${cid}).`,
+            "bot"
+          );
+          resumeInput.value = "";
+        } catch (err) {
+          console.error(err);
+          addMessage("Upload failed. Check server logs.", "bot");
+        } finally {
+          uploadBtn.disabled = false;
+          uploadBtn.textContent = "Upload Resume";
+        }
+      }
+
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const question = input.value.trim();
@@ -177,6 +269,8 @@
         const reply = await ask(question);
         addMessage(reply, "bot");
       });
+
+      uploadBtn.addEventListener("click", uploadResume);
     </script>
   </body>
 </html>

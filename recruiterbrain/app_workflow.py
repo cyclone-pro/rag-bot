@@ -1386,6 +1386,8 @@ def _tools_match_line(
     - up to ~10 skills total (mix of present + missing)
     - avoids huge ugly lines
     """
+    if not required:
+         return "No explicit JD tools parsed; ranking is based on semantic match only."
     norm_set = {t.lower().strip() for t in normalized_tools}
     missing_set = {m.lower().strip() for m in (missing or [])}
 
@@ -1940,7 +1942,9 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
                 if t_norm and t_norm not in seen:
                     seen.add(t_norm)
                     merged.append(t_norm)
-            plan["required_tools"] = merged
+                    # Ensure JD-required tools are cleaned + canonicalized
+            plan["required_tools"] = _canonicalize_required_tools(plan.get("required_tools") or [])
+
             # OPTIONAL: discover new skills from this JD and log them
             try:
                  from recruiterbrain.shared_config import SKILL_CATALOG
@@ -1957,6 +1961,7 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
         cleaned_for_embed = strip_contact_meta_phrases(original_question)
         plan["embedding_query"] = cleaned_for_embed
         plan["question"] = cleaned_for_embed
+        plan["required_tools"] = _canonicalize_required_tools(plan.get("required_tools") or [])
 
     # Heuristic booster (years-of-exp -> stage, etc.)
     _augment_plan_with_heuristics(original_question, plan)
@@ -2077,8 +2082,27 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     logger.info("Generated %d insight rows (total matches: %d)", len(top_hits), total_matches)
 
     required = [tool.strip().lower() for tool in plan.get("required_tools", []) if tool]
+
+    # If this is NOT JD mode and nothing was set, use a default vector stack.
     if not required and not plan.get("_jd_mode"):
         required = list(DEFAULT_REQUIRED_TOOLS)
+
+    # --- NEW: JD fallback ---
+    # If this IS JD mode but the JD extractor ended up with no tools,
+    # derive tools directly from the original question using the canonical catalog.
+    if not required and plan.get("_jd_mode"):
+        q_lower = (original_question or "").lower()
+        inferred: List[str] = []
+
+        # Use the CANONICAL_SKILLS variants to sniff skills in the text
+        for canon, variants in CANONICAL_SKILLS.items():
+            for v in variants:
+                if v.lower() in q_lower:
+                    inferred.append(canon)
+                    break  # don't add the same canon twice for multiple variants
+
+        required = _canonicalize_required_tools(inferred)
+
 
     tier_buckets: Dict[str, List[Dict[str, Any]]] = {label: [] for label in LABEL_ORDER}
     missing_counter: Dict[str, int] = {}

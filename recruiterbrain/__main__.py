@@ -15,7 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from fastapi.templating import Jinja2Templates
-
+from fastapi import UploadFile, File, Form
+from recruiterbrain.resume_ingestion import ingest_resume_upload
 from recruiterbrain.env_loader import load_env
 from recruiterbrain.logging_config import configure_logging
 from recruiterbrain.shared_config import get_encoder, get_milvus_client
@@ -59,7 +60,7 @@ try:
     logger.info("Warmup: Milvus client and encoder loaded")
 except Exception as exc:
     logger.warning("Warmup failed (will lazy-load on demand): %s", exc)
-    
+
 # ---- Tiny in-memory cache for identical questions ----
 _CHAT_CACHE: Dict[str, ChatResponse] = {}
 _CHAT_CACHE_MAX = 200  # cap to avoid unbounded growth
@@ -142,6 +143,12 @@ class MarkdownExport(BaseModel):
 class JSONExport(BaseModel):
     payload: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+class ResumeIngestResponse(BaseModel):
+    candidate_id: str
+    name: Optional[str] = None
+    email: Optional[str] = None
+    status: str
 
 
 def _normalize_required_tools(tools: Optional[List[str]]) -> List[str]:
@@ -294,6 +301,30 @@ def export_json() -> Dict[str, Any]:
     logger.debug("Exporting last insight result as JSON")
     return JSONExport(payload=latest).model_dump()
 
+    
+@app.post("/ingest_resume", response_model=ResumeIngestResponse)
+async def ingest_resume_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    source_channel: str = Form("Upload"),
+    _: None = Depends(rate_limiter),
+) -> Dict[str, Any]:
+    """
+    Upload a single resume (PDF/DOCX/TXT), parse it with the LLM,
+    embed it, and insert into Milvus (new_candidate_pool).
+    """
+    logger.info("Received resume upload: filename=%s source_channel=%s", file.filename, source_channel)
+    try:
+        result = await ingest_resume_upload(file, source_channel=source_channel)
+        return ResumeIngestResponse(
+            candidate_id=result["candidate_id"],
+            name=result.get("name"),
+            email=result.get("email"),
+            status=result["status"],
+        ).model_dump()
+    except Exception as exc:
+        logger.exception("Error ingesting resume")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 @app.get("/help")
 def help_menu() -> Dict[str, Any]:
