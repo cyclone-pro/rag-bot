@@ -3,13 +3,16 @@ import io
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Tuple
 from fastapi import UploadFile
 from pymilvus import MilvusException
 import re
 import hashlib
 import base64
+from google.cloud import storage
+import os
+
 from recruiterbrain.shared_config import (
     COLLECTION,
     EMBED_MODEL,
@@ -227,6 +230,47 @@ def normalize_candidate_for_milvus(candidate: Dict[str, Any]) -> Dict[str, Any]:
     # if it's already a list, we keep it as-is
 
     return candidate
+def upload_raw_resume_to_gcs(
+    data: bytes,
+    filename: str,
+    candidate_id: str,
+) -> Tuple[str, str]:
+    """
+    Upload raw resume bytes to GCS and return (gs_uri, signed_url).
+
+    - gs_uri:  "gs://bucket/path/to/file"
+    - signed_url: time-limited HTTPS URL (e.g. 7 days) for recruiter UI.
+    """
+    bucket_name = os.getenv("GCS_RESUME_BUCKET")
+    prefix = os.getenv("GCS_RESUME_PREFIX", "raw-resumes")
+
+    if not bucket_name:
+        logger.warning("GCS_RESUME_BUCKET not set; skipping raw resume upload.")
+        return "", ""
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+
+    safe_name = filename.replace(" ", "_")
+    object_name = f"{prefix}/{candidate_id}/{safe_name}"
+
+    blob = bucket.blob(object_name)
+    blob.upload_from_string(data)
+
+    gs_uri = f"gs://{bucket_name}/{object_name}"
+
+    # Signed URL (adjust expiration as you like)
+    try:
+        signed_url = blob.generate_signed_url(
+            expiration=timedelta(days=7),
+            method="GET",
+        )
+    except Exception as e:
+        logger.warning("Failed to generate signed URL for %s: %s", gs_uri, e)
+        signed_url = ""
+
+    logger.info("Uploaded raw resume to GCS: %s", gs_uri)
+    return gs_uri, signed_url
 
 # --- old ---
 # def _add_embeddings(candidate: Dict[str, Any]) -> None:
@@ -321,6 +365,10 @@ async def ingest_resume_upload(file: UploadFile, source_channel: str = "Upload")
 
     # ⬇️ pass the full resume text so we embed the whole thing
     row = build_milvus_row(candidate, full_resume_text=text)
+    cid=row["candidate_id"]
+    gs_uri,signed_url=upload_raw_resume_to_gcs(data=data,
+                        filename=file.filename,
+                         candidate_id=cid,)
     candidate_id = insert_candidate_into_milvus(row)
 
     return {
@@ -328,5 +376,7 @@ async def ingest_resume_upload(file: UploadFile, source_channel: str = "Upload")
         "email": row.get("email"),
         "name": row.get("name"),
         "status": "inserted",
+        "raw_resume_gcs_uri":gs_uri,
+        "raw_resume_signed_url":signed_url,
     }
 

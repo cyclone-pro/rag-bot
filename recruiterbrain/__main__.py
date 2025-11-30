@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import timedelta
 import logging
 import os
 import sys
@@ -13,6 +14,7 @@ import json
 from fastapi import Body, FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from google.cloud import storage
 from pydantic import BaseModel, Field
 from fastapi.templating import Jinja2Templates
 from fastapi import UploadFile, File, Form
@@ -232,6 +234,44 @@ def chat_endpoint(chat_input: ChatRequest,_: None = Depends(rate_limiter),) -> D
     _CHAT_CACHE[key] = resp
     return ChatResponse(answer=answer).model_dump()
 
+@app.get("/candidates/{candidate_id}/resume_url")
+def get_resume_url(candidate_id: str, ttl_minutes: int = 15) -> Dict[str, str]:
+    """
+    Given a candidate_id (e.g. 'HJTRD4'), generate a fresh signed URL to their raw resume in GCS.
+
+    - Does NOT touch Milvus; uses deterministic GCS path: <prefix>/<candidate_id>.
+    - ttl_minutes: how long the URL should be valid for (default: 15 minutes).
+    """
+
+    bucket_name = os.getenv("GCS_RESUME_BUCKET")
+    prefix = os.getenv("GCS_RESUME_PREFIX", "raw-resumes")
+
+    if not bucket_name:
+        raise HTTPException(status_code=500, detail="GCS_RESUME_BUCKET not configured")
+
+    if ttl_minutes <= 0 or ttl_minutes > 24 * 60:
+        # Safety bounds: 1 minute to 24 hours
+        ttl_minutes = 15
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    object_name = f"{prefix}/{candidate_id}"
+    blob = bucket.blob(object_name)
+
+    if not blob.exists():
+        raise HTTPException(status_code=404, detail="Resume not found for this candidate_id")
+
+    url = blob.generate_signed_url(
+        expiration=timedelta(minutes=ttl_minutes),
+        method="GET",
+    )
+
+    return {
+        "candidate_id": candidate_id,
+        "resume_url": url,
+        "expires_in_minutes": ttl_minutes,
+    }
+
 
 @app.post("/insight", response_model=InsightResponse)
 def insight_endpoint(payload: InsightRequest,_: None = Depends(rate_limiter),) -> Dict[str, Any]:
@@ -301,7 +341,7 @@ def export_json() -> Dict[str, Any]:
     logger.debug("Exporting last insight result as JSON")
     return JSONExport(payload=latest).model_dump()
 
-    
+
 @app.post("/ingest_resume", response_model=ResumeIngestResponse)
 async def ingest_resume_endpoint(
     request: Request,

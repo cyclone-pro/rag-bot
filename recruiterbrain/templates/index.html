@@ -109,8 +109,8 @@
         font-size: 0.9rem;
       }
 
-      /* === Resume upload panel === */
-      .upload-panel {
+      /* Panels under chat */
+      .panel {
         background: var(--panel);
         border: 1px solid var(--border);
         border-radius: 18px;
@@ -119,21 +119,22 @@
         flex-direction: column;
         gap: 0.5rem;
       }
-      .upload-header {
+      .panel-header {
         font-weight: 600;
         font-size: 0.95rem;
       }
-      .upload-row {
+      .panel-row {
         display: flex;
         gap: 0.75rem;
         align-items: center;
         flex-wrap: wrap;
       }
-      .upload-row input[type="file"] {
+      .panel-row input[type="file"],
+      .panel-row input[type="text"] {
         flex: 1;
         max-width: 320px;
       }
-      .upload-hint {
+      .panel-hint {
         font-size: 0.85rem;
         color: var(--muted);
       }
@@ -146,6 +147,7 @@
         <p>Ask natural-language questions to search and rank your candidate pool.</p>
       </header>
 
+      <!-- Chat panel -->
       <section class="chat-panel">
         <div id="messages" class="messages">
           <div class="message bot">
@@ -164,15 +166,33 @@
         </form>
       </section>
 
-      <!-- New: resume upload panel -->
-      <section class="upload-panel">
-        <div class="upload-header">Add candidate resume</div>
-        <div class="upload-row">
+      <!-- Upload resume panel -->
+      <section class="panel">
+        <div class="panel-header">Add candidate resume</div>
+        <div class="panel-row">
           <input id="resume-file" type="file" accept=".pdf,.doc,.docx,.txt" />
           <button id="upload-btn" type="button">Upload Resume</button>
         </div>
-        <p class="upload-hint">
+        <p class="panel-hint">
           We’ll parse, embed the full resume, and index it into your Milvus <code>new_candidate_pool</code>.
+        </p>
+      </section>
+
+      <!-- View resume panel -->
+      <section class="panel">
+        <div class="panel-header">View candidate resume by ID</div>
+        <div class="panel-row">
+          <input
+            id="candidate-id-input"
+            type="text"
+            placeholder="Enter candidate ID (e.g. HJTRD4)…"
+            autocomplete="off"
+          />
+          <button id="view-resume-btn" type="button">View Resume</button>
+        </div>
+        <p class="panel-hint">
+          Use the <code>candidate_id</code> from search / logs. We’ll generate a signed URL and open the raw resume
+          from GCS.
         </p>
       </section>
 
@@ -187,6 +207,9 @@
 
       const resumeInput = document.getElementById("resume-file");
       const uploadBtn = document.getElementById("upload-btn");
+
+      const candidateIdInput = document.getElementById("candidate-id-input");
+      const viewResumeBtn = document.getElementById("view-resume-btn");
 
       function addMessage(text, role) {
         const bubble = document.createElement("div");
@@ -260,6 +283,51 @@
         }
       }
 
+      async function viewResume() {
+        let cid = candidateIdInput.value.trim();
+        if (!cid) {
+          alert("Please enter a candidate ID.");
+          return;
+        }
+
+        // Your short-id helper uppercases IDs; do same here
+        cid = cid.toUpperCase();
+
+        viewResumeBtn.disabled = true;
+        viewResumeBtn.textContent = "Fetching…";
+
+        try {
+          const res = await fetch(
+            `/candidates/${encodeURIComponent(cid)}/resume_url`
+          );
+          if (!res.ok) {
+            const msg = `Resume lookup failed for ${cid} (HTTP ${res.status})`;
+            console.error(msg);
+            addMessage(msg, "bot");
+            return;
+          }
+          const data = await res.json();
+          if (data.resume_url) {
+            addMessage(
+              `🔗 Opening resume for candidate_id ${cid} (expires in ${data.expires_in_minutes} minutes).`,
+              "bot"
+            );
+            window.open(data.resume_url, "_blank");
+          } else {
+            addMessage(
+              `No resume URL returned for candidate_id ${cid}.`,
+              "bot"
+            );
+          }
+        } catch (err) {
+          console.error(err);
+          addMessage("Error while fetching resume URL.", "bot");
+        } finally {
+          viewResumeBtn.disabled = false;
+          viewResumeBtn.textContent = "View Resume";
+        }
+      }
+
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const question = input.value.trim();
@@ -271,6 +339,7 @@
       });
 
       uploadBtn.addEventListener("click", uploadResume);
+      viewResumeBtn.addEventListener("click", viewResume);
     </script>
   </body>
 </html>
