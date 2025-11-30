@@ -271,6 +271,62 @@ def upload_raw_resume_to_gcs(
 
     logger.info("Uploaded raw resume to GCS: %s", gs_uri)
     return gs_uri, signed_url
+def ingest_resume_bytes(
+    filename: str,
+    data: bytes,
+    source_channel: str = "Upload",
+) -> Dict[str, Any]:
+    """
+    Core ingestion pipeline that:
+    - extracts text
+    - extracts PII
+    - calls LLM to build structured candidate JSON
+    - normalizes to Milvus schema
+    - computes embeddings
+    - uploads raw resume to GCS
+    - inserts row into Milvus
+
+    This is used by both single-file and bulk ingestion.
+    """
+    text = extract_text_from_file_bytes(filename, data)
+
+    if not text.strip():
+        raise RuntimeError("Could not extract text from resume file.")
+
+    email, phone = extract_pii(text)
+    logger.info("Extracted PII: email=%s phone=%s", email, phone)
+
+    candidate = _call_llm_structured_resume(text)
+
+    candidate.setdefault("source_channel", source_channel)
+    candidate.setdefault("hiring_manager_notes", "Unknown")
+    candidate.setdefault("interview_feedback", "Unknown")
+    candidate.setdefault("offer_status", "Unknown")
+    candidate.setdefault("assigned_recruiter", "Unknown")
+
+    candidate = normalize_candidate_for_milvus(candidate)
+    _apply_pii_overrides(candidate, email, phone)
+
+    row = build_milvus_row(candidate, full_resume_text=text)
+    cid = row["candidate_id"]
+
+    # Upload raw resume to GCS (no schema changes in Milvus)
+    gs_uri, signed_url = upload_raw_resume_to_gcs(
+        data=data,
+        filename=filename,
+        candidate_id=cid,
+    )
+
+    candidate_id = insert_candidate_into_milvus(row)
+
+    return {
+        "candidate_id": candidate_id,
+        "email": row.get("email"),
+        "name": row.get("name"),
+        "status": "inserted",
+        "raw_resume_gcs_uri": gs_uri,
+        "raw_resume_signed_url": signed_url,
+    }
 
 # --- old ---
 # def _add_embeddings(candidate: Dict[str, Any]) -> None:
@@ -322,7 +378,6 @@ def insert_candidate_into_milvus(row: Dict[str, Any]) -> str:
             collection_name=COLLECTION,
             data=[row],   # single row insert
         )
-        # result["insert_count"], result["ids"] etc – depends on pymilvus version
         logger.info("Inserted candidate into %s (candidate_id=%s)", COLLECTION, row["candidate_id"])
         return row["candidate_id"]
     except MilvusException as exc:
@@ -371,12 +426,9 @@ async def ingest_resume_upload(file: UploadFile, source_channel: str = "Upload")
                          candidate_id=cid,)
     candidate_id = insert_candidate_into_milvus(row)
 
-    return {
-        "candidate_id": candidate_id,
-        "email": row.get("email"),
-        "name": row.get("name"),
-        "status": "inserted",
-        "raw_resume_gcs_uri":gs_uri,
-        "raw_resume_signed_url":signed_url,
-    }
+    return ingest_resume_bytes(
+        filename=file.filename,
+        data=data,
+        source_channel=source_channel,
+    )
 

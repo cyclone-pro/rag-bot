@@ -18,7 +18,7 @@ from google.cloud import storage
 from pydantic import BaseModel, Field
 from fastapi.templating import Jinja2Templates
 from fastapi import UploadFile, File, Form
-from recruiterbrain.resume_ingestion import ingest_resume_upload
+from recruiterbrain.resume_ingestion import ingest_resume_upload,ingest_resume_bytes
 from recruiterbrain.env_loader import load_env
 from recruiterbrain.logging_config import configure_logging
 from recruiterbrain.shared_config import get_encoder, get_milvus_client
@@ -151,6 +151,18 @@ class ResumeIngestResponse(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     status: str
+class BulkIngestItem(BaseModel):
+    filename: str
+    candidate_id: str | None = None
+    name: str | None = None
+    email: str | None = None
+    status: str
+    error: str | None = None
+
+
+class BulkIngestResponse(BaseModel):
+    successes: List[BulkIngestItem]
+    failures: List[BulkIngestItem]
 
 
 def _normalize_required_tools(tools: Optional[List[str]]) -> List[str]:
@@ -272,6 +284,63 @@ def get_resume_url(candidate_id: str, ttl_minutes: int = 15) -> Dict[str, str]:
         "expires_in_minutes": ttl_minutes,
     }
 
+@app.post("/ingest_resumes_bulk", response_model=BulkIngestResponse)
+async def ingest_resumes_bulk(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    source_channel: str = Form("BulkUpload"),
+    _: None = Depends(rate_limiter),
+) -> Dict[str, Any]:
+    """
+    Bulk ingest multiple resumes in a single request.
+    - Reuses the same pipeline as /ingest_resume (GCS + Milvus).
+    - Returns per-file success / failure.
+    """
+
+    MAX_FILES = 50  # guardrail; adjust as you like
+    if len(files) > MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files; max {MAX_FILES} per request.",
+        )
+
+    successes: List[BulkIngestItem] = []
+    failures: List[BulkIngestItem] = []
+
+    for upload in files:
+        filename = upload.filename or "unknown"
+
+        try:
+            data = await upload.read()
+            result = ingest_resume_bytes(
+                filename=filename,
+                data=data,
+                source_channel=source_channel,
+            )
+
+            successes.append(
+                BulkIngestItem(
+                    filename=filename,
+                    candidate_id=result.get("candidate_id"),
+                    name=result.get("name"),
+                    email=result.get("email"),
+                    status=result.get("status", "inserted"),
+                )
+            )
+        except Exception as exc:
+            logger.exception("Bulk ingest failed for %s", filename)
+            failures.append(
+                BulkIngestItem(
+                    filename=filename,
+                    candidate_id=None,
+                    name=None,
+                    email=None,
+                    status="error",
+                    error=str(exc),
+                )
+            )
+
+    return BulkIngestResponse(successes=successes, failures=failures).model_dump()
 
 @app.post("/insight", response_model=InsightResponse)
 def insight_endpoint(payload: InsightRequest,_: None = Depends(rate_limiter),) -> Dict[str, Any]:

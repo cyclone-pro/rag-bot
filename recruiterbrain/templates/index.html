@@ -177,6 +177,23 @@
           We’ll parse, embed the full resume, and index it into your Milvus <code>new_candidate_pool</code>.
         </p>
       </section>
+       <!-- Bulk upload panel -->
+       <section class="panel">
+        <div class="panel-header">Bulk upload resumes</div>
+        <div class="panel-row">
+          <input
+            id="bulk-resume-files"
+            type="file"
+            accept=".pdf,.doc,.docx,.txt"
+            multiple
+          />
+          <button id="bulk-upload-btn" type="button">Upload Selected</button>
+        </div>
+        <p class="panel-hint">
+          Select multiple resumes at once. Each will be parsed, embedded, uploaded to GCS, and indexed into
+          <code>new_candidate_pool</code>. The chat can then rank across the entire pool.
+        </p>
+      </section>
 
       <!-- View resume panel -->
       <section class="panel">
@@ -204,6 +221,9 @@
       const input = document.getElementById("question");
       const messages = document.getElementById("messages");
       const sendBtn = document.getElementById("send");
+      const bulkInput = document.getElementById("bulk-resume-files");
+      const bulkUploadBtn = document.getElementById("bulk-upload-btn");
+
 
       const resumeInput = document.getElementById("resume-file");
       const uploadBtn = document.getElementById("upload-btn");
@@ -240,6 +260,69 @@
           sendBtn.disabled = false;
         }
       }
+      async function uploadBulkResumes() {
+        const files = bulkInput.files;
+        if (!files || files.length === 0) {
+          alert("Please select one or more resume files.");
+          return;
+        }
+
+        const formData = new FormData();
+        for (const file of files) {
+          formData.append("files", file);
+        }
+        formData.append("source_channel", "BulkUpload");
+
+        bulkUploadBtn.disabled = true;
+        bulkUploadBtn.textContent = "Uploading…";
+
+        try {
+          const res = await fetch("/ingest_resumes_bulk", {
+            method: "POST",
+            body: formData,
+          });
+          if (!res.ok) {
+            const msg = `Bulk upload failed (HTTP ${res.status})`;
+            console.error(msg);
+            addMessage(msg, "bot");
+            return;
+          }
+          const data = await res.json();
+
+          const okCount = (data.successes || []).length;
+          const failCount = (data.failures || []).length;
+
+          addMessage(
+            `📥 Bulk upload complete: ${okCount} success, ${failCount} failed.`,
+            "bot"
+          );
+
+          (data.successes || []).forEach((item) => {
+            addMessage(
+              `✅ [Bulk] ${item.filename} → candidate_id: ${item.candidate_id || "unknown"}, name: ${
+                item.name || "Unknown"
+              }`,
+              "bot"
+            );
+          });
+
+          (data.failures || []).forEach((item) => {
+            addMessage(
+              `⚠️ [Bulk] ${item.filename} failed: ${item.error || "Unknown error"}`,
+              "bot"
+            );
+          });
+
+          bulkInput.value = "";
+        } catch (err) {
+          console.error(err);
+          addMessage("Bulk upload failed. Check server logs.", "bot");
+        } finally {
+          bulkUploadBtn.disabled = false;
+          bulkUploadBtn.textContent = "Upload Selected";
+        }
+      }
+
 
       async function uploadResume() {
         const file = resumeInput.files[0];
@@ -340,6 +423,8 @@
 
       uploadBtn.addEventListener("click", uploadResume);
       viewResumeBtn.addEventListener("click", viewResume);
+      bulkUploadBtn.addEventListener("click", uploadBulkResumes);
+
     </script>
   </body>
 </html>
