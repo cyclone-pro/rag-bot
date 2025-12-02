@@ -9,6 +9,9 @@ import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import time
 import json
+import asyncio
+import io
+import zipfile
 
 
 from fastapi import Body, FastAPI, HTTPException, Request, Depends
@@ -188,6 +191,28 @@ def _build_insight_response(text: str) -> InsightResponse:
         total_matched=latest.get("total_matched"),
     )
 
+async def _ingest_one_resume_concurrent(
+    filename: str,
+    data: bytes,
+    source_channel: str,
+    semaphore: asyncio.Semaphore,
+) -> tuple[str, dict | Exception]:
+    """
+    Wrap ingest_resume_bytes() in a background thread with concurrency control.
+
+    Returns (filename, result_or_exception).
+    """
+    async with semaphore:
+        try:
+            result = await asyncio.to_thread(
+                ingest_resume_bytes,
+                filename,
+                data,
+                source_channel,
+            )
+            return filename, result
+        except Exception as exc:
+            return filename, exc
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
@@ -292,43 +317,90 @@ async def ingest_resumes_bulk(
     _: None = Depends(rate_limiter),
 ) -> Dict[str, Any]:
     """
-    Bulk ingest multiple resumes in a single request.
+    Bulk ingest multiple resumes in a single request (with basic concurrency + ZIP support).
+
+    - Accepts multiple files.
+    - If a file is a .zip, expands it and ingests each valid entry.
     - Reuses the same pipeline as /ingest_resume (GCS + Milvus).
-    - Returns per-file success / failure.
     """
 
-    MAX_FILES = 50  # guardrail; adjust as you like
-    if len(files) > MAX_FILES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Too many files; max {MAX_FILES} per request.",
-        )
+    MAX_FILES = 200  # guardrail: total logical resumes per request
+    MAX_CONCURRENCY = 3  # avoid hammering OpenAI + CPU
 
-    successes: List[BulkIngestItem] = []
-    failures: List[BulkIngestItem] = []
+    # 1) Collect (filename, data) pairs for all files & zip entries
+    logical_files: list[tuple[str, bytes]] = []
 
     for upload in files:
         filename = upload.filename or "unknown"
+        raw_data = await upload.read()
 
-        try:
-            data = await upload.read()
-            result = ingest_resume_bytes(
-                filename=filename,
+        if filename.lower().endswith(".zip"):
+            # Expand zip
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
+                    for member in zf.infolist():
+                        if member.is_dir():
+                            continue
+                        inner_name = member.filename
+
+                        # Only process supported extensions
+                        lower = inner_name.lower()
+                        if not (
+                            lower.endswith(".pdf")
+                            or lower.endswith(".doc")
+                            or lower.endswith(".docx")
+                            or lower.endswith(".txt")
+                        ):
+                            logger.info(
+                                "Skipping non-resume file in ZIP: %s", inner_name
+                            )
+                            continue
+
+                        file_bytes = zf.read(member)
+                        logical_files.append((inner_name, file_bytes))
+            except Exception as exc:
+                logger.exception("Failed to process ZIP file %s", filename)
+                # register the whole zip as a failure
+                logical_files.append(
+                    (
+                        filename,
+                        b"",  # will fail later in ingestion
+                    )
+                )
+        else:
+            # Regular single resume file
+            logical_files.append((filename, raw_data))
+
+    if len(logical_files) > MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many resumes in bulk request; max {MAX_FILES}. Found {len(logical_files)}.",
+        )
+
+    # 2) Launch concurrent ingestion tasks
+    semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+    tasks: list[asyncio.Task] = []
+
+    for (fname, data) in logical_files:
+        task = asyncio.create_task(
+            _ingest_one_resume_concurrent(
+                filename=fname,
                 data=data,
                 source_channel=source_channel,
+                semaphore=semaphore,
             )
+        )
+        tasks.append(task)
 
-            successes.append(
-                BulkIngestItem(
-                    filename=filename,
-                    candidate_id=result.get("candidate_id"),
-                    name=result.get("name"),
-                    email=result.get("email"),
-                    status=result.get("status", "inserted"),
-                )
-            )
-        except Exception as exc:
-            logger.exception("Bulk ingest failed for %s", filename)
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+
+    # 3) Build successes / failures
+    successes: List[BulkIngestItem] = []
+    failures: List[BulkIngestItem] = []
+
+    for (filename, outcome) in results:
+        if isinstance(outcome, Exception):
+            logger.exception("Bulk ingest failed for %s", filename, exc_info=outcome)
             failures.append(
                 BulkIngestItem(
                     filename=filename,
@@ -336,11 +408,24 @@ async def ingest_resumes_bulk(
                     name=None,
                     email=None,
                     status="error",
-                    error=str(exc),
+                    error=str(outcome),
+                )
+            )
+        else:
+            # outcome is the dict returned by ingest_resume_bytes()
+            successes.append(
+                BulkIngestItem(
+                    filename=filename,
+                    candidate_id=outcome.get("candidate_id"),
+                    name=outcome.get("name"),
+                    email=outcome.get("email"),
+                    status=outcome.get("status", "inserted"),
+                    error=None,
                 )
             )
 
     return BulkIngestResponse(successes=successes, failures=failures).model_dump()
+
 
 @app.post("/insight", response_model=InsightResponse)
 def insight_endpoint(payload: InsightRequest,_: None = Depends(rate_limiter),) -> Dict[str, Any]:

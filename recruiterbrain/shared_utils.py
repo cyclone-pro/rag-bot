@@ -6,7 +6,7 @@ import json
 import logging
 import math
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple , Set
 
 from recruiterbrain.env_loader import load_env
 from recruiterbrain.shared_config import ALIAS_MAP, DOMAIN_SYNONYMS, WEAK_EQUIVALENTS
@@ -229,6 +229,9 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
             "keywords_summary",
             "semantic_summary",
             "certifications",
+            "evidence_tools",
+            "evidence_skills",
+            "employment_history",
         ],
     )
 
@@ -302,18 +305,60 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
     return normalized, ctx
 
 
-def coverage(required_tools: List[str], normalized_tools: set[str]) -> Tuple[int, List[str], Dict[str, List[str]]]:
+def jd_tool_covered(
+    req_norm: str,
+    norm_tools: Set[str],
+    resume_text: Optional[str] = None,
+) -> bool:
     """
-    Compute how many of the required tools are covered by normalized_tools.
+    Decide if a required JD tool (already normalized) is covered by the candidate.
 
-    - Strong match: required token == tool OR substring match.
+    1) Check against normalized structured tools (norm_tools).
+    2) If not found, fall back to a raw-text search across the resume text blob.
+    """
+    if not req_norm:
+        return False
+
+    # ---- strong match: exact or LIMITED substring match ----
+    def strong_match(tool: str) -> bool:
+        if req_norm == tool:
+            return True
+
+        # Only allow substring matching for reasonably long tokens,
+        # to avoid "la" matching "flask", etc.
+        if len(req_norm) >= 4 and len(tool) >= 4:
+            return req_norm in tool or tool in req_norm
+        return False
+
+    if any(strong_match(tool) for tool in norm_tools):
+        return True
+
+    # ---- raw resume text fallback ----
+    if resume_text:
+        txt = resume_text.lower()
+        # Slightly relaxed length check here
+        if len(req_norm) >= 3 and req_norm in txt:
+            return True
+
+    return False
+
+
+def coverage(
+    required_tools: List[str],
+    normalized_tools: set[str],
+    resume_text: Optional[str] = None,
+) -> Tuple[int, List[str], Dict[str, List[str]]]:
+    """
+    Compute how many of the required tools are covered.
+
+    - Strong match: via jd_tool_covered (structured tools + raw resume text).
     - Weak match: no strong match, but one of the WEAK_EQUIVALENTS is present.
       Weak matches are returned in weak_hits and still count toward coverage.
     """
     logger.debug("Computing coverage for required=%s", required_tools)
 
     # normalize tools once
-    norm_tools = {_norm(t) for t in normalized_tools if t}
+    norm_tools: Set[str] = {_norm(t) for t in normalized_tools if t}
 
     covered_set: set[str] = set()
     missing: List[str] = []
@@ -324,22 +369,10 @@ def coverage(required_tools: List[str], normalized_tools: set[str]) -> Tuple[int
         if not req_norm:
             continue
 
-        # ---- strong match: exact or substring match ----
-                # ---- strong match: exact or LIMITED substring match ----
-        def strong_match(req_norm: str, tool: str) -> bool:
-             if req_norm == tool:
-                return True
-
-            # Only allow substring matching for reasonably long tokens,
-            # to avoid "la" matching "flask", "ia" matching "gcia", etc.
-             if len(req_norm) >= 4 and len(tool) >= 4:
-                 return req_norm in tool or tool in req_norm
-             return False
-
-        if any(strong_match(req_norm, tool) for tool in norm_tools):
+        # ---- strong match via structured tools OR raw resume text ----
+        if jd_tool_covered(req_norm, norm_tools, resume_text):
             covered_set.add(req_norm)
             continue
-
 
         # ---- weak match via WEAK_EQUIVALENTS ----
         hits: List[str] = []
@@ -364,6 +397,7 @@ def coverage(required_tools: List[str], normalized_tools: set[str]) -> Tuple[int
 
     # tier_label expects an int
     return len(covered_set), missing, weak_hits
+
 
 
 def extract_overlaps(required_tools: List[str], normalized_tools: set[str]) -> List[str]:

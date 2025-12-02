@@ -189,7 +189,12 @@ def _query_with_fallback(client, *, expr: str | None):
         logger.exception("Milvus query failed")
         raise
 def ann_search(plan: Dict[str, Any]):
-    """Run ANN search plus scalar pre/post filters."""
+    """Run ANN search plus scalar post-filters.
+
+    IMPORTANT: We let ANN search decide the candidate universe and then
+    hydrate those hits by candidate_id. We do NOT gate by a random 5k
+    scalar pre-query anymore.
+    """
     if "question" not in plan:
         raise ValueError("plan must include original question text under the 'question' key")
 
@@ -202,21 +207,19 @@ def ann_search(plan: Dict[str, Any]):
     cand_col = get_milvus_client()
     encoder = get_encoder()
 
+    # Optional scalar constraint (industry, career_stage, etc.)
     expr = build_expr_from_plan(plan)
     logger.debug("Scalar expr from plan: %s", expr)
-
-    base_rows = _query_with_fallback(cand_col, expr=expr) or []
-    logger.debug("Fetched %d scalar rows for plan", len(base_rows))
-
-    base_by_id = {row["candidate_id"]: row for row in base_rows if row.get("candidate_id") is not None}
 
     embed_text = plan.get("embedding_query") or plan.get("question")
     if not embed_text:
         raise ValueError("plan must include 'embedding_query' or 'question' text for embedding")
 
+    # --- Build query embedding ---
     qtext = apply_model_prefix(embed_text, EMBED_MODEL, is_query=True)
     qvec = encoder.encode([qtext], normalize_embeddings=True)[0].tolist()
     ann_limit = max(top_k * 4, 100)
+
     logger.info(
         "Running ANN search (field=%s, top_k=%s, ann_limit=%s, embed_len=%d)",
         vec_field,
@@ -225,18 +228,24 @@ def ann_search(plan: Dict[str, Any]):
         len(embed_text),
     )
 
-    hits = cand_col.search(
-        collection_name=COLLECTION,
-        data=[qvec],
-        anns_field=vec_field,
-        search_params={"metric_type": METRIC, "params": {"ef": EF_SEARCH}},
-        limit=ann_limit,
-        output_fields=["candidate_id"],
-    )
+    # --- ANN search, optionally with scalar filter ---
+    search_kwargs: Dict[str, Any] = {
+        "collection_name": COLLECTION,
+        "data": [qvec],
+        "anns_field": vec_field,
+        "search_params": {"metric_type": METRIC, "params": {"ef": EF_SEARCH}},
+        "limit": ann_limit,
+        "output_fields": ["candidate_id"],
+    }
+    if expr:
+        search_kwargs["filter"] = expr
+
+    hits = cand_col.search(**search_kwargs)
     hit_list = hits[0] if hits else []
     logger.info("ann_search: raw ANN hits=%d", len(hit_list))
 
-    vec_ids = []
+    # --- Extract candidate_ids from ANN hits ---
+    vec_ids: List[Any] = []
     for hit in hit_list:
         if isinstance(hit, dict):
             entity = hit.get("entity") if isinstance(hit.get("entity"), dict) else {}
@@ -247,9 +256,27 @@ def ann_search(plan: Dict[str, Any]):
             continue
         vec_ids.append(cid)
 
-    logger.info("ann_search: unique candidate IDs from ANN=%d", len(vec_ids))
+    # preserve ANN order but dedupe
+    unique_ids: List[Any] = list(dict.fromkeys(vec_ids))
+    logger.info("ann_search: unique candidate IDs from ANN=%d", len(unique_ids))
 
-    merged = [base_by_id[cid] for cid in vec_ids if cid in base_by_id]
+    if not unique_ids:
+        return [], 0
+
+    # --- Hydrate ANN hits by candidate_id (no random 5k gate) ---
+    id_literals = ",".join(
+        f'"{cid}"' if isinstance(cid, str) else str(cid) for cid in unique_ids
+    )
+    hydrate_expr = f"candidate_id in [{id_literals}]"
+
+    base_rows = _query_with_fallback(cand_col, expr=hydrate_expr) or []
+    base_by_id = {
+        row["candidate_id"]: row
+        for row in base_rows
+        if row.get("candidate_id") is not None
+    }
+
+    merged = [base_by_id[cid] for cid in unique_ids if cid in base_by_id]
     logger.info("ann_search: merged ANN+scalar rows=%d", len(merged))
 
     # 1) normal post_filter
@@ -291,6 +318,8 @@ def ann_search(plan: Dict[str, Any]):
 
     limited = filtered[:top_k]
     return attach_sim_scores(limited, hit_list), len(filtered)
+
+
 
 
 

@@ -537,12 +537,13 @@ def _clean_skill_phrase(raw: str) -> str:
         return ""
 
     # --- Salesforce phrase collapsing: prefer concrete clouds over generic SFDC ---
-    if "salesforce" in words:
-        if "service" in words and "cloud" in words:
+        # --- Salesforce phrase collapsing ---
+    if any("salesforce" in w for w in words):
+        if any("service" in w for w in words) and "cloud" in " ".join(words):
             return "service cloud"
-        if "health" in words and "cloud" in words:
+        if any("health" in w for w in words) and "cloud" in " ".join(words):
             return "health cloud"
-        if "experience" in words and "cloud" in words:
+        if "experience" in " ".join(words) and "cloud" in " ".join(words):
             return "experience cloud"
         return "salesforce"
 
@@ -1859,8 +1860,8 @@ def _should_show_contacts(user_last_message: str) -> bool:
 def _scarcity_message(tier_counts: Dict[str, int], missing_counter: Dict[str, int]) -> Optional[str]:
     if tier_counts.get("Perfect", 0) == 0 and tier_counts.get("Good", 0) == 0:
         if not missing_counter:
-            return "Few strong matches. Consider allowing 2/4 or accepting Pinecone/Weaviate as equivalents."
-
+            return ("No strong matches under the current skill criteria. "
+               "Try relaxing the required skills, allowing partial matches, or broadening the search.")
         # Filter out junk/non-skill keys before choosing "top missing"
         filtered: Dict[str, int] = {}
         for key, count in missing_counter.items():
@@ -1884,6 +1885,27 @@ def _scarcity_message(tier_counts: Dict[str, int], missing_counter: Dict[str, in
         return f"Most candidates missing {top_missing_pretty}. Consider relaxing that requirement or treating it as a nice-to-have."
     return None
 
+def _patch_salesforce_ide_query(original_question: str, plan: Dict[str, Any]) -> None:
+    """
+    Special-case fixer for queries like:
+    'experience in IDE, DataLoader, Import Wizard, Salesforce.com Sandbox environments, AppExchange'
+    """
+    q = (original_question or "").lower()
+    if "dataloader" in q or "data loader" in q:
+        # overwrite must_have_keywords with canonical Salesforce tools
+        plan["must_have_keywords"] = [
+            "data loader",
+            "import wizard",
+            "salesforce",
+            "app exchange",
+        ]
+        # optional: drop 'ide' as a core skill
+        # (it's too generic to be a hard requirement)
+        plan["required_tools"] = plan["must_have_keywords"]
+
+        # This is a pure tools/skills query - use skills_embedding,
+        # not summary_embedding.
+        plan["vector_field"] = "skills_embedding"
 
 
 def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = None) -> str:
@@ -1965,6 +1987,8 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
 
     # Heuristic booster (years-of-exp -> stage, etc.)
     _augment_plan_with_heuristics(original_question, plan)
+    _patch_salesforce_ide_query(original_question, plan)
+
 
     # --- Respect explicit "N candidates" / "top N" in the question ---
     text_lower = (original_question or "").lower()
@@ -2033,11 +2057,56 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
         LAST_INSIGHT_RESULT = None
         logger.debug("Handling %s intent for question", intent)
         return_top = int(plan.get("return_top") or RETURN_TOP)
-        top_hits = paired_hits[:return_top]
+        ranked_hits = paired_hits
+
+        # --- Re-rank list results by tool coverage when we have required_tools ---
+        required = [t for t in (plan.get("required_tools") or []) if t]
+        if intent == "list" and required:
+            tier_order = {"Perfect": 0, "Good": 1, "Acceptable": 2, "Partial": 3}
+            ranked_entries = []
+
+            for entity, sim in paired_hits:
+                # normalize candidate's tools from row
+                tools, _ctx = normalize_tools(entity)
+                resume_text = " ".join(
+                                  str(entity.get(k, "")) or ""
+                                  for k in [
+                                                 "employment_history",
+                                         "semantic_summary",
+                                         "keywords_summary",
+                                         "evidence_tools",
+                                          "evidence_skills",
+                                             ]
+                                                    )
+
+                # how many required tools do they really cover?
+                covered_count, missing, weak_hits = coverage(required,tools,resume_text=resume_text,)
+                tier = tier_label(covered_count)
+
+                # fuzzy score using your JD vs candidate tool scoring
+                tool_match = _score_candidate_tools(
+                    core_required=required,
+                    nice_to_have=plan.get("nice_to_have_tools", []),
+                    candidate_tools=tools,
+                )
+
+                ranked_entries.append(
+                    (
+                        tier_order.get(tier, 4),              # primary: tier (Perfect > Good > ...)
+                        -tool_match["score_percent"],         # secondary: higher % is better
+                        -float(sim),                          # tertiary: ANN similarity
+                        entity,
+                        float(sim),
+                    )
+                )
+
+            ranked_entries.sort()
+            ranked_hits = [(e, s) for (_tier, _score, _neg_sim, e, s) in ranked_entries]
+
+        top_hits = ranked_hits[:return_top]
 
         # detect if user wants contacts (use original text!)
         show_contacts = _should_show_contacts(original_question)
-
         if intent == "count":
             return f"Total matched candidates: {total_matches}"
 
@@ -2061,6 +2130,9 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
 
                 lines.append(f"{idx}. {base}")
 
+            if not lines:
+                return "No candidates matched after filters."
+            
             body = "\n".join(lines)
             return (
                 f"Total matched: {total_matches}\n\n{body}"
@@ -2109,24 +2181,45 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
 
     for entity, sim in top_hits:
         tools, _ctx = normalize_tools(entity)
+
+        # >>> Build a raw-ish resume text blob used by coverage()
+        resume_text = " ".join(
+            str(entity.get(k, "")) or ""
+            for k in [
+                "employment_history",
+                "semantic_summary",
+                "keywords_summary",
+                "evidence_tools",
+                "evidence_skills",
+            ]
+        )
+
         tool_match = _score_candidate_tools(
             core_required=required,
             nice_to_have=plan.get("nice_to_have_tools", []),
             candidate_tools=tools,
         )
-        covered, missing, weak_hits = coverage(required, tools)
+
+        # >>> Pass resume_text into coverage so we can catch Import Wizard / AppExchange
+        covered, missing, weak_hits = coverage(
+            required,
+            tools,
+            resume_text=resume_text,
+        )
+
         for miss in missing:
             missing_counter[miss] = missing_counter.get(miss, 0) + 1
+
         label = tier_label(covered)
         tier_buckets.setdefault(label, []).append(
             {
                 "entity": entity,
                 "sim": float(sim),
-                "covered": covered,      # usually a set of matched tools
+                "covered": covered,      # number of matched tools
                 "missing": missing,      # list of required tools not present
                 "weak_hits": weak_hits,  # dict: required -> [equivalents]
-                "tools": tools,   # stash full scoring details 
-                "tool_match": tool_match,                    # normalized tools for the candidate
+                "tools": tools,          # stash normalized tools
+                "tool_match": tool_match,
             }
         )
 
@@ -2153,7 +2246,6 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     # Should we include LinkedIn / email in the insight output?
     show_contacts = _should_show_contacts(original_question)
 
-    
     formatted_rows: List[Dict[str, Any]] = []
 
     for idx, entry in enumerate(final_entries):
@@ -2173,7 +2265,6 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
         covered_count = tool_match["core_exact_matches"]
 
         jd_text = plan.get("_jd_raw") or plan.get("question") or ""
-
 
         exp_comment = experience_gap_comment(jd_text, entity)
         has_experience_gap = exp_comment is not None
@@ -2196,7 +2287,7 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
             required_tools=required,
             missing_tools=missing_tokens,
             primary_gap=primary_gap,
-)
+        )
 
         title = extract_latest_title(
             entity.get("employment_history"),
@@ -2204,7 +2295,6 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
         )
         canonical_role = _map_role_to_canonical(title)
         entity["role_family_canonical"] = canonical_role
-
 
         position = render_position(entity.get("career_stage", ""), title)
         primary, secondary = select_industries(
@@ -2224,17 +2314,15 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
         # Attach experience + primary gap info to notes
         extra_bits: List[str] = []
         if exp_comment:
-            extra_bits.append(exp_comment)  # e.g. "JD requires 8+ years; candidate has 6.1 (short by ~1.9 years)."
+            extra_bits.append(exp_comment)
         if primary_gap and primary_gap != "none":
             extra_bits.append(f"Primary gap: {primary_gap}")
         if gap_explanation:
-          extra_bits.append(gap_explanation)
-
+            extra_bits.append(gap_explanation)
 
         notes = base_notes
         if extra_bits:
             notes = base_notes + " " + " ".join(extra_bits)
-
 
         percentile_value = percentiles[idx] if percentiles else 100
 
@@ -2263,7 +2351,6 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
         row["experience_comment"] = exp_comment
         row["primary_gap"] = primary_gap
         row["gap_explanation"] = gap_explanation
-
 
         evidence = evidence_snippets(entity)
         if evidence:
@@ -2320,12 +2407,11 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     else:
         body = "No ranked candidates qualified under the current criteria."
 
-
     header = f"Total matched: {total_matches}"
     extras = [msg for msg in (scarcity_msg, dq_banner) if msg]
     preface = ("\n".join(extras) + "\n\n") if extras else ""
     return f"{header}\n\n{preface}{body}"
-
+    
 def get_last_insight_result() -> Optional[Dict[str, Any]]:
     return LAST_INSIGHT_RESULT
 

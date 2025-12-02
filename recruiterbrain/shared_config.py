@@ -293,6 +293,13 @@ BRAND_ALIASES: Dict[str, str] = {
     "linux": "linux",
     "arista": "arista os",
     "cisco ios": "cisco ios",
+    "app exchange": "appexchange",
+    "app exchange":  "salesforce appexchange",
+    "salesforce": "salesforce.com",
+    "salesforce":  "sfdc",
+    "sandbox": "salesforce sandbox", 
+
+
 }
 
 # Back-compat: keep old name for existing imports/usages

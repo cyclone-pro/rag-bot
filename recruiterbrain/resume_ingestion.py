@@ -12,6 +12,7 @@ import hashlib
 import base64
 from google.cloud import storage
 import os
+from google.auth.exceptions import RefreshError
 
 from recruiterbrain.shared_config import (
     COLLECTION,
@@ -230,17 +231,12 @@ def normalize_candidate_for_milvus(candidate: Dict[str, Any]) -> Dict[str, Any]:
     # if it's already a list, we keep it as-is
 
     return candidate
+
 def upload_raw_resume_to_gcs(
     data: bytes,
     filename: str,
     candidate_id: str,
 ) -> Tuple[str, str]:
-    """
-    Upload raw resume bytes to GCS and return (gs_uri, signed_url).
-
-    - gs_uri:  "gs://bucket/path/to/file"
-    - signed_url: time-limited HTTPS URL (e.g. 7 days) for recruiter UI.
-    """
     bucket_name = os.getenv("GCS_RESUME_BUCKET")
     prefix = os.getenv("GCS_RESUME_PREFIX", "raw-resumes")
 
@@ -250,27 +246,35 @@ def upload_raw_resume_to_gcs(
 
     client = storage.Client()
     bucket = client.bucket(bucket_name)
-
-    safe_name = filename.replace(" ", "_")
-    object_name = f"{prefix}/{candidate_id}/{safe_name}"
-
+    object_name = f"{prefix}/{candidate_id}"
     blob = bucket.blob(object_name)
-    blob.upload_from_string(data)
 
-    gs_uri = f"gs://{bucket_name}/{object_name}"
-
-    # Signed URL (adjust expiration as you like)
     try:
-        signed_url = blob.generate_signed_url(
-            expiration=timedelta(days=7),
-            method="GET",
+        blob.upload_from_string(data)
+        gs_uri = f"gs://{bucket_name}/{object_name}"
+        try:
+            signed_url = blob.generate_signed_url(
+                expiration=timedelta(days=7),
+                method="GET",
+            )
+        except Exception as e:
+            logger.warning("Failed to generate signed URL for %s: %s", gs_uri, e)
+            signed_url = ""
+        logger.info("Uploaded raw resume to GCS: %s", gs_uri)
+        return gs_uri, signed_url
+    except RefreshError as e:
+        logger.error(
+            "GCS auth refresh failed during upload for candidate_id=%s: %s. "
+            "Run `gcloud auth application-default login` or configure a service account.",
+            candidate_id,
+            e,
         )
+        # Don’t crash the whole pipeline – just skip GCS
+        return "", ""
     except Exception as e:
-        logger.warning("Failed to generate signed URL for %s: %s", gs_uri, e)
-        signed_url = ""
+        logger.exception("Unexpected error uploading resume to GCS")
+        return "", ""
 
-    logger.info("Uploaded raw resume to GCS: %s", gs_uri)
-    return gs_uri, signed_url
 def ingest_resume_bytes(
     filename: str,
     data: bytes,

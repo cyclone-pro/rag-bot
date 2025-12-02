@@ -1,6 +1,4 @@
 from shared_config import get_milvus_client, COLLECTION, FIELDS
-from shared_config import get_milvus_client, COLLECTION
-
 
 def main():
     client = get_milvus_client()
