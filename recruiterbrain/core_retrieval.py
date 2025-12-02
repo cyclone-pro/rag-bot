@@ -189,12 +189,7 @@ def _query_with_fallback(client, *, expr: str | None):
         logger.exception("Milvus query failed")
         raise
 def ann_search(plan: Dict[str, Any]):
-    """Run ANN search plus scalar post-filters.
-
-    IMPORTANT: We let ANN search decide the candidate universe and then
-    hydrate those hits by candidate_id. We do NOT gate by a random 5k
-    scalar pre-query anymore.
-    """
+    """Run ANN search plus scalar post-filters with hybrid keyword boosting."""
     if "question" not in plan:
         raise ValueError("plan must include original question text under the 'question' key")
 
@@ -211,11 +206,49 @@ def ann_search(plan: Dict[str, Any]):
     expr = build_expr_from_plan(plan)
     logger.debug("Scalar expr from plan: %s", expr)
 
+    # Check if this is a keyword-heavy query (like Salesforce with many specific tools)
+    required_tools = plan.get("required_tools") or []
+    is_keyword_heavy = len(required_tools) >= 5  # 5+ specific tools mentioned
+    
+    # HYBRID RETRIEVAL MODE
+    if is_keyword_heavy:
+        logger.info("Keyword-heavy query detected (%d tools) - using hybrid retrieval", len(required_tools))
+        
+        # Step 1: Get keyword-based candidates using scalar filter
+        keyword_expr_parts = []
+        for tool in required_tools[:7]:  # Use top 7 tools for keyword matching
+            # Escape the tool name and search in both skills_extracted and tools_and_technologies
+            safe_tool = tool.replace('"', '""')
+            keyword_expr_parts.append(
+                f'(skills_extracted like "%{safe_tool}%" or tools_and_technologies like "%{safe_tool}%")'
+            )
+        
+        keyword_expr = " or ".join(keyword_expr_parts)
+        if expr:
+            keyword_expr = f"({expr}) and ({keyword_expr})"
+        
+        logger.info("Keyword filter: %s", keyword_expr[:200])
+        
+        # Query with keyword filter to get exact-match candidates
+        try:
+            keyword_candidates = _query_with_fallback(cand_col, expr=keyword_expr) or []
+            logger.info("Keyword-based retrieval found %d candidates", len(keyword_candidates))
+        except Exception as e:
+            logger.warning("Keyword retrieval failed: %s, falling back to vector-only", e)
+            keyword_candidates = []
+        
+        # Get candidate IDs from keyword search
+        keyword_ids = {row["candidate_id"] for row in keyword_candidates}
+        
+    else:
+        keyword_candidates = []
+        keyword_ids = set()
+
+    # --- Build query embedding for ANN search ---
     embed_text = plan.get("embedding_query") or plan.get("question")
     if not embed_text:
         raise ValueError("plan must include 'embedding_query' or 'question' text for embedding")
 
-    # --- Build query embedding ---
     qtext = apply_model_prefix(embed_text, EMBED_MODEL, is_query=True)
     qvec = encoder.encode([qtext], normalize_embeddings=True)[0].tolist()
     ann_limit = max(top_k * 4, 100)
@@ -257,15 +290,40 @@ def ann_search(plan: Dict[str, Any]):
         vec_ids.append(cid)
 
     # preserve ANN order but dedupe
-    unique_ids: List[Any] = list(dict.fromkeys(vec_ids))
-    logger.info("ann_search: unique candidate IDs from ANN=%d", len(unique_ids))
+    unique_ann_ids: List[Any] = list(dict.fromkeys(vec_ids))
+    logger.info("ann_search: unique candidate IDs from ANN=%d", len(unique_ann_ids))
 
-    if not unique_ids:
+    # --- MERGE STRATEGY: Keyword matches first, then ANN matches ---
+    if is_keyword_heavy and keyword_ids:
+        # Prioritize keyword matches (exact skill matches)
+        # These go first because they're guaranteed to have the required skills
+        merged_ids = []
+        
+        # 1. Add keyword-matched candidates first (they have exact skills)
+        for row in keyword_candidates:
+            cid = row["candidate_id"]
+            if cid not in merged_ids:
+                merged_ids.append(cid)
+        
+        # 2. Add ANN candidates that aren't already in keyword results
+        for cid in unique_ann_ids:
+            if cid not in keyword_ids and cid not in merged_ids:
+                merged_ids.append(cid)
+        
+        # Limit to reasonable size for hydration
+        merged_ids = merged_ids[:max(ann_limit * 2, 200)]
+        logger.info("Hybrid merge: %d keyword + %d new from ANN = %d total", 
+                    len(keyword_ids), len(merged_ids) - len(keyword_ids), len(merged_ids))
+    else:
+        # No keyword candidates or not keyword-heavy - use ANN results only
+        merged_ids = unique_ann_ids
+
+    if not merged_ids:
         return [], 0
 
-    # --- Hydrate ANN hits by candidate_id (no random 5k gate) ---
+    # --- Hydrate merged candidates by candidate_id ---
     id_literals = ",".join(
-        f'"{cid}"' if isinstance(cid, str) else str(cid) for cid in unique_ids
+        f'"{cid}"' if isinstance(cid, str) else str(cid) for cid in merged_ids
     )
     hydrate_expr = f"candidate_id in [{id_literals}]"
 
@@ -276,7 +334,8 @@ def ann_search(plan: Dict[str, Any]):
         if row.get("candidate_id") is not None
     }
 
-    merged = [base_by_id[cid] for cid in unique_ids if cid in base_by_id]
+    # Preserve the priority order (keyword matches first)
+    merged = [base_by_id[cid] for cid in merged_ids if cid in base_by_id]
     logger.info("ann_search: merged ANN+scalar rows=%d", len(merged))
 
     # 1) normal post_filter
@@ -318,8 +377,6 @@ def ann_search(plan: Dict[str, Any]):
 
     limited = filtered[:top_k]
     return attach_sim_scores(limited, hit_list), len(filtered)
-
-
 
 
 

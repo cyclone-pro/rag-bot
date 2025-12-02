@@ -75,6 +75,17 @@ Skills and tools:
   - 3–6 job titles, most recent first, normalized, e.g. "Salesforce Architect", "Oracle SCM Functional Consultant".
 - domains_of_expertise:
   - Business/technical domains, e.g. "MLOps", "Healthcare IT", "Supply Chain Management", "Salesforce CRM", "ERP".
+- skills_extracted:
+  - Core skills as compact tokens, e.g. "Python", "FastAPI", "Kubernetes", "Salesforce CPQ", "Oracle Cloud SCM".
+  - Avoid very long phrases; normalize to consistent names.
+- tools_and_technologies:
+  - Concrete tools/frameworks/clouds, e.g. "Milvus", "dbt", "Vertex AI", "Oracle Fusion R23", "Salesforce Financial Services Cloud", "Snowflake".
+  - ALWAYS include **platform-specific utilities and environments** (not just the platform):
+    - For Salesforce resumes, explicitly list items like:
+      - "Salesforce", "Salesforce CRM", "Sales Cloud", "Service Cloud", "Marketing Cloud", "Financial Services Cloud"
+      - "Data Loader", "Import Wizard", "AppExchange", "Sandbox", "Change Sets", "Flosum", "Force.com IDE" / "Salesforce IDE"
+    - If these are mentioned anywhere in the resume, they MUST appear in `tools_and_technologies`.
+
 
 Employment history:
 - employment_history MUST be an ARRAY, even if there is only one job.
@@ -148,6 +159,11 @@ Vertical domains:
   - Construction, field engineering, BIM, construction project management.
 - cad_relevance_score:
   - CAD tools (AutoCAD, Revit, SolidWorks, etc.).
+- crm_salesforce_domain_score:
+  - Salesforce CRM (Sales Cloud, Service Cloud, Marketing Cloud, Financial Services Cloud, Health Cloud, CPQ, etc.).
+  - 0.6–0.8 if Salesforce is one of several skills.
+  - 0.8–1.0 if the candidate is primarily a Salesforce developer/architect/admin with multiple Salesforce roles.
+
 
 ERP / CRM / supply-chain (NEW – important for Oracle/Salesforce profiles):
 - crm_salesforce_domain_score:
@@ -207,6 +223,10 @@ Role family:
   - Data engineer / analytics engineer → "data".
   - ML engineer / MLOps engineer → "mlops".
   - General software engineer with React + Node → "fullstack".
+- If the profile is primarily Salesforce / Oracle / SAP / Workday / NetSuite / other CRM/ERP:
+  - Set role_family = "crm_erp" (even if they also write code).
+- Only use "backend" / "fullstack" when it’s a general software engineer, not a CRM/ERP specialist.
+
   - If unclear → "other".
 
 Years band:

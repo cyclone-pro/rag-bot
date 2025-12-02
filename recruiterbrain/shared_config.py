@@ -506,6 +506,8 @@ WEAK_EQUIVALENTS: Dict[str, Set[str]] = {
     # Salesforce clouds
     "service cloud": {"salesforce service cloud", "salesforce"},
     "salesforce": {"service cloud", "salesforce health cloud", "experience cloud"},
+    "salesforce": {"service cloud", "sales cloud", "marketing cloud", "salesforce crm"},
+
 
     # BI tools
     "power bi": {"tableau", "looker"},
@@ -529,6 +531,18 @@ WEAK_EQUIVALENTS: Dict[str, Set[str]] = {
     "openai api": {"openai", "azure open ai"},
 
     # Salesforce / etc. as needed...
+    "app exchange": {"appexchange", "salesforce appexchange"},
+    "ide": {"force ide", "force.com ide"},
+    "data loader": {"bulk loader", "bulk data load"},
+    "appexchange": {"app exchange"},
+    "sandbox": {"test org", "dev sandbox"},
+    "salesforce": {"sfdc", "salesforce crm", "salesforce.com"},
+    "apex": {"apex trigger", "apex class"},
+    "visualforce": {"vf page", "visualforce page"},
+    "lightning web components": {"lwc", "lightning components", "aura components"},
+    "data loader": {"import wizard", "data import", "dataloader"},
+    "service cloud": {"salesforce service cloud"},
+    "sales cloud": {"salesforce sales cloud"},
 
 
 }

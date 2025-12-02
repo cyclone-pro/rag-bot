@@ -195,6 +195,22 @@ CANONICAL_SKILLS: Dict[str, List[str]] = {
     # Misc scripting
     "powershell": ["powershell"],
     "bash": ["bash", "shell scripting"],
+     "apex": ["apex", "apex trigger", "apex class"],
+    "visualforce": ["visualforce", "visualforce page", "vf page"],
+    "lightning web components": ["lightning web components", "lwc", "lightning components"],
+    "salesforce cpq": ["salesforce cpq", "cpq", "configure price quote"],
+    "salesforce": ["salesforce", "sfdc", "salesforce.com", "salesforce crm"],
+    "service cloud": ["service cloud", "salesforce service cloud"],
+    "sales cloud": ["sales cloud", "salesforce sales cloud"],
+    "marketing cloud": ["marketing cloud", "salesforce marketing cloud"],
+    "financial services cloud": ["financial services cloud", "fsc"],
+    "data loader": ["data loader", "salesforce data loader"],
+    "data migration": ["data migration", "data import", "data export"],
+    
+    # Integration/APIs
+    "rest": ["rest", "rest api", "restful", "rest services"],
+    "soap": ["soap", "soap api", "soap services"],
+    "integration": ["integration", "integrations", "api integration"],
 }
 
 # Canonical role families -> variants (titles)
@@ -385,6 +401,7 @@ NON_SKILL_PATTERNS = [
 ]
 
 
+"""
 def _clean_skill_phrase(raw: str) -> str:
     # Normalize spacing
     txt = re.sub(r"\s+", " ", (raw or "")).strip()
@@ -397,14 +414,27 @@ def _clean_skill_phrase(raw: str) -> str:
         return ""
 
     # Drop D2D labels from "D2D: Day to Day" sections
-    if lower in {"d2d", "d2d:"}:
+    if lower in {"d2d", "d2d:","day to day"}:
         return ""
 
     # Drop pure US-style state abbreviations etc.
     # Keep short language names like "go", "c", "r" explicitly.
-    SHORT_ALLOWED = {"go", "c", "r"}
-    if len(txt) <= 2 and lower not in SHORT_ALLOWED:
-        return ""
+    # CRITICAL: Expand SHORT_ALLOWED to include common tech terms
+    SHORT_ALLOWED = {
+        "go", "c", "r",          # languages
+        "aws", "gcp", "api",     # cloud/tech
+        "rest", "soap",          # protocols
+        "apex", "lwc",           # Salesforce
+        "cpq", "crm",            # business apps
+        "iam", "sso", "vpn",     # security
+        "etl", "elt", "eda",     # data
+        "ci", "cd", "ml", "ai",  # devops/ai
+    }
+    if len(txt) <= 4 and lower not in SHORT_ALLOWED:
+       if lower not in SHORT_ALLOWED:
+            # Only drop if it's ALSO a state code or pure number
+            if lower in US_STATE_CODES or not any(ch.isalpha() for ch in txt):
+                return ""
 
 
     # Kill obvious html-entity junk like client&#39;
@@ -482,10 +512,6 @@ def _clean_skill_phrase(raw: str) -> str:
     # Too long -> likely a sentence or description, not a skill
     if len(words) > 6:
         return ""
-    if "give me" in lower and "contact" in lower:
-         return ""
-    if lower in {"d2d", "d2d:", "day to day"}:
-         return ""
     if words[-1] == "solutions":
         return ""
 
@@ -568,7 +594,128 @@ def _clean_skill_phrase(raw: str) -> str:
             return ""
 
     return cleaned
+"""
+def _clean_skill_phrase(raw: str) -> str:
+    """Clean and normalize a skill phrase for matching."""
+    txt = re.sub(r"\s+", " ", (raw or "")).strip()
+    if not txt:
+        return ""
 
+    lower = txt.lower()
+    
+    # Drop query/instruction artefacts
+    if "give me" in lower or "their contact" in lower or "contact" in lower:
+        return ""
+    if lower in {"d2d", "d2d:", "day to day"}:
+        return ""
+
+    # CRITICAL: Expand SHORT_ALLOWED to include common tech terms
+    SHORT_ALLOWED = {
+        "go", "c", "r",          # languages
+        "aws", "gcp", "api",     # cloud/tech
+        "rest", "soap",          # protocols
+        "apex", "lwc",           # Salesforce
+        "cpq", "crm",            # business apps
+        "iam", "sso", "vpn",     # security
+        "etl", "elt", "eda",     # data
+        "ci", "cd", "ml", "ai",  # devops/ai
+    }
+    
+    # Keep short technical terms that are in the allowed list
+    if len(txt) <= 4:
+        if lower not in SHORT_ALLOWED:
+            # Only drop if it's ALSO a state code or pure number
+            if lower in US_STATE_CODES or not any(ch.isalpha() for ch in txt):
+                return ""
+        # If it's in SHORT_ALLOWED, keep it
+
+    # Kill HTML entities
+    if "&#" in lower:
+        return ""
+
+    # Drop sentences (contains ". ")
+    if ". " in txt:
+        return ""
+
+    # Pure number / no letters -> drop
+    if not any(ch.isalpha() for ch in txt):
+        return ""
+
+    # Strip punctuation
+    txt = txt.strip(",.;:-/\\()[]{}")
+    lower = txt.lower()
+
+    # Check patterns
+    for pat in NON_SKILL_PATTERNS:
+        if re.search(pat, lower):
+            return ""
+
+    if not txt:
+        return ""
+
+    # Blocklist check
+    if lower in _SKILL_BLOCKLIST:
+        return ""
+
+    # Split into words
+    words = lower.split()
+    words = [w for w in words if any(ch.isalnum() for ch in w)]
+    if not words:
+        return ""
+    
+    # Limit phrase length (but be more lenient)
+    if len(words) > 5:  # increased from 3
+        return ""
+
+    # Strip leading stopwords
+    while words and words[0] in _SKILL_STOPWORDS:
+        words.pop(0)
+    if not words:
+        return ""
+
+    # If starts with generic verb/vague prefix -> skip
+    if words[0] in _NON_SKILL_PREFIXES:
+        return ""
+
+    # Strip trailing stopwords
+    while words and words[-1] in _SKILL_STOPWORDS:
+        words.pop()
+    if not words:
+        return ""
+
+    # Final soft skill filter
+    SOFT_MID_WORDS = {
+        "aspiration", "aspirations", "goals", "goal",
+        "resources", "resource", "strategy", "strategies",
+        "framework", "frameworks", "policy", "policies",
+        "governance", "mentorship", "mentor", "coaching",
+        "culture", "environment", "stakeholders", "stakeholder",
+        "team", "teams", "users", "business",
+        "support", "supporting", "collaboration", "collaborate",
+    }
+    
+    # Only filter if NO tech hints present
+    if any(w in SOFT_MID_WORDS for w in words):
+        if not any(w in TECH_HINTS for w in words):
+            return ""
+
+    # Salesforce special handling
+    if any("salesforce" in w for w in words):
+        if "service" in words and "cloud" in " ".join(words):
+            return "service cloud"
+        if "health" in words or "healthcare" in " ".join(words):
+            return "health cloud"
+        if "financial" in words and "cloud" in " ".join(words):
+            return "financial services cloud"
+        return "salesforce"
+
+    cleaned = " ".join(words)
+
+    # Final guards
+    if cleaned in _SKILL_STOPWORDS or cleaned in _SKILL_BLOCKLIST:
+        return ""
+
+    return cleaned
 def _map_skill_to_canonical(skill: str) -> str:
     """
     Map a cleaned skill phrase to a canonical skill using fuzzy matching.
@@ -2076,6 +2223,11 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
                                          "keywords_summary",
                                          "evidence_tools",
                                           "evidence_skills",
+                                          "skills_extracted ",
+                                          "tools_and_technologies",
+
+
+                                          ""
                                              ]
                                                     )
 
@@ -2325,6 +2477,9 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
             notes = base_notes + " " + " ".join(extra_bits)
 
         percentile_value = percentiles[idx] if percentiles else 100
+        logger.info("DEBUG JD tools: required=%s", required)
+        logger.info("DEBUG normalized_tools for %s: %s", entity.get("name"), list(tools))
+        logger.info("DEBUG coverage=%s missing=%s", covered, missing)
 
         tools_line = _tools_match_line(
             required=required,
@@ -2411,7 +2566,7 @@ def answer_question(question: str, plan_override: Optional[Dict[str, Any]] = Non
     extras = [msg for msg in (scarcity_msg, dq_banner) if msg]
     preface = ("\n".join(extras) + "\n\n") if extras else ""
     return f"{header}\n\n{preface}{body}"
-    
+
 def get_last_insight_result() -> Optional[Dict[str, Any]]:
     return LAST_INSIGHT_RESULT
 

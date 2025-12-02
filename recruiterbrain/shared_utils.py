@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple , Set
 
 from recruiterbrain.env_loader import load_env
 from recruiterbrain.shared_config import ALIAS_MAP, DOMAIN_SYNONYMS, WEAK_EQUIVALENTS
+import ast
 
 load_env()
 
@@ -199,13 +200,23 @@ def select_industries(primary_industry: str, sub_industries: Any) -> Tuple[str, 
 
 
 def _gather_text_fields(entity: Dict[str, Any], keys: List[str]) -> List[str]:
+    """
+    Extract text values from entity fields, properly handling both strings and lists.
+    """
     values: List[str] = []
     for key in keys:
         value = entity.get(key)
+        if not value:
+            continue
+            
         if isinstance(value, str):
             values.append(value)
         elif isinstance(value, list):
-            values.extend([str(item) for item in value if item])
+            # If it's already a list, join with semicolons to preserve structure
+            values.append("; ".join(str(item) for item in value if item))
+        else:
+            values.append(str(value))
+    
     return values
 
 
@@ -213,10 +224,6 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
     """
     Collects all skills/tools/domains from key fields and canonicalizes them into a
     normalized set used for JD coverage.
-
-    Important: we add canonical tags like 'aws', 'azure', 'hipaa', etc. whenever
-    they appear inside longer phrases such as 'aws developer', 'aws solutions architect',
-    'hipaa certified', etc.
     """
     text_fields = _gather_text_fields(
         entity,
@@ -239,10 +246,28 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
     for text in text_fields:
         if not text:
             continue
-        # split on commas, slashes, semicolons, and " and "
-        for piece in re.split(r"[,/;]|\band\b", str(text), flags=re.IGNORECASE):
+        
+        # Convert to string if it's not already
+        text_str = str(text)
+        
+        # CRITICAL: Try to parse stringified lists first
+        # Your DB has entries like "['apex', 'visualforce', 'lwc']"
+        if text_str.startswith("[") and text_str.endswith("]"):
+            try:
+                parsed = ast.literal_eval(text_str)
+                if isinstance(parsed, list):
+                    raw_tokens.extend([str(item).strip() for item in parsed if item])
+                    continue
+            except (ValueError, SyntaxError):
+                # If parsing fails, treat as regular string
+                pass
+        
+        # Split on semicolons (your primary separator), commas, slashes
+        for piece in re.split(r"[;,/]|\band\b", text_str, flags=re.IGNORECASE):
             piece = piece.strip()
-            if piece:
+            # Remove any lingering quotes from the piece
+            piece = piece.strip("'\"")
+            if piece and piece != "[]":
                 raw_tokens.append(piece)
 
     normalized: set[str] = set()
@@ -250,13 +275,51 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
     for token in raw_tokens:
         if not token:
             continue
-        s = _norm(token)  # typically lower + strip
+        
+        # Clean up any remaining quote artifacts
+        token = token.strip("'\"[]")
+        
+        s = _norm(token)  # lower + strip whitespace
         if not s:
             continue
 
-        # --- Canonicalization block: add short "core" tags from longer phrases ---
+        # === Salesforce canonicalization ===
+        if "apex" in s:
+            normalized.add("apex")
+        if "visualforce" in s or "vf page" in s or "vf" == s:
+            normalized.add("visualforce")
+        if ("lightning" in s and ("web" in s or "component" in s)) or s == "lwc":
+            normalized.add("lightning web components")
+            normalized.add("lwc")
+        if "cpq" in s or "configure price quote" in s:
+            normalized.add("salesforce cpq")
+            normalized.add("cpq")
+        if "data loader" in s or "dataloader" in s:
+            normalized.add("data loader")
+        if "data migration" in s or "data import" in s or "import wizard" in s:
+            normalized.add("data migration")
+        if "service cloud" in s:
+            normalized.add("service cloud")
+        if "sales cloud" in s:
+            normalized.add("sales cloud")
+        if "marketing cloud" in s:
+            normalized.add("marketing cloud")
+        if "financial services cloud" in s or "fsc" in s:
+            normalized.add("financial services cloud")
+        if "salesforce" in s or "sfdc" in s:
+            normalized.add("salesforce")
+        
+        # === Integration/API ===
+        if s in {"rest", "rest api", "restful", "rest services"}:
+            normalized.add("rest")
+        if s in {"soap", "soap api", "soap services"}:
+            normalized.add("soap")
+        if s in {"integration", "integrations", "api integration"}:
+            normalized.add("integration")
+        if s in {"agile", "agile methodology", "scrum"}:
+            normalized.add("agile")
 
-        # Clouds
+        # === Cloud canonicalization (existing) ===
         if "aws" in s:
             normalized.add("aws")
         if "azure" in s:
@@ -264,39 +327,14 @@ def normalize_tools(entity: Dict[str, Any]) -> tuple[set[str], Dict[str, Any]]:
         if "gcp" in s or "google cloud" in s:
             normalized.add("gcp")
 
-        # Security / compliance
+        # === Other existing canonicalizations ===
         if "hipaa" in s:
             normalized.add("hipaa")
-        if "soc2" in s or "soc 2" in s:
-            normalized.add("soc2")
-
-        # Backend role (helps for queries like "backend developer")
         if "backend" in s and "developer" in s:
             normalized.add("backend")
 
-        # Databases / data platforms
-        if "snowflake" in s:
-            normalized.add("snowflake")
-        if "redshift" in s:
-            normalized.add("redshift")
-
-        # DevOps / IaC
-        if "terraform" in s:
-            normalized.add("terraform")
-        if "ansible" in s:
-            normalized.add("ansible")
-        if "kubernetes" in s or "k8s" in s:
-            normalized.add("kubernetes")
-
         # Finally add the full normalized token itself
         normalized.add(s)
-        # TEMP DEBUG
-    
-    if entity.get("name") == "Peyton Gonzalez":
-        print("RAW TOKENS:", raw_tokens)
-        print("AFTER _norm:", [ _norm(t) for t in raw_tokens ])
-        print("FINAL normalized:", normalized)
-
 
     ctx = {
         "raw_tools": text_fields,
@@ -356,6 +394,12 @@ def coverage(
       Weak matches are returned in weak_hits and still count toward coverage.
     """
     logger.debug("Computing coverage for required=%s", required_tools)
+     # DEBUG: Log what we're comparing
+    logger.info("=" * 60)
+    logger.info("COVERAGE DEBUG")
+    logger.info("Required tools: %s", required_tools)
+    logger.info("Normalized candidate tools: %s", list(normalized_tools)[:20])
+    logger.info("=" * 60)
 
     # normalize tools once
     norm_tools: Set[str] = {_norm(t) for t in normalized_tools if t}
@@ -390,11 +434,14 @@ def coverage(
         if hits:
             weak_hits[req] = hits
             covered_set.add(req_norm)  # count as covered (but weak)
+            logger.info("~ WEAK MATCH: %s via %s", req, hits)
             continue
 
         # ---- truly missing ----
         missing.append(req)
+        logger.info("✗ MISSING: %s", req)
 
+    logger.info("Final coverage: %d/%d", len(covered_set), len(required_tools))
     # tier_label expects an int
     return len(covered_set), missing, weak_hits
 
