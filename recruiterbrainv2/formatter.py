@@ -7,9 +7,14 @@ logger = logging.getLogger(__name__)
 
 def format_for_chat(results: Dict[str, Any], show_contacts: bool = False) -> str:
     """Format V2 results as plain text for chat interface."""
+    
+    if results.get("error"):
+        return results["error"]
+    
     candidates = results.get("candidates", [])
     total = results.get("total_found", 0)
     mode = results.get("search_mode", "vector")
+    
     
     if not candidates:
         return f"No candidates found. (searched {total} records, mode={mode})"
@@ -57,8 +62,17 @@ def format_for_chat(results: Dict[str, Any], show_contacts: bool = False) -> str
 
 def format_for_insight(results: Dict[str, Any]) -> Dict[str, Any]:
     """Format V2 results for insight/ranking view."""
+
+    if results.get("error"):
+
+        return {
+            "rows": [],
+            "total_matched": 0,
+            "scarcity_message": results["error"],
+            "data_quality_banner": None,
+        }
+
     candidates = results.get("candidates", [])
-    
     rows = []
     for cand in candidates:
         match = cand.get("match", {})
