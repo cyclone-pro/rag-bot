@@ -1,10 +1,39 @@
 """V2 Configuration - Simplified and production-ready."""
-import os
 import logging
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _load_env_files() -> None:
+    """Load environment variables from .env files if python-dotenv is installed."""
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        logger.debug("python-dotenv not installed; skipping .env load")
+        return
+
+    base_dir = Path(__file__).resolve().parent
+    candidates = [
+        base_dir / ".env",               # recruiterbrainv2/.env
+        base_dir.parent / ".env",        # repo-level .env
+    ]
+    loaded_any = False
+    for env_path in candidates:
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+            loaded_any = True
+            logger.info("Loaded environment from %s", env_path)
+
+    if not loaded_any:
+        logger.debug("No .env file found alongside recruiterbrainv2")
+
+
+# Ensure .env is loaded before reading values
+_load_env_files()
 
 # ========================
 # Environment
