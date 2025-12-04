@@ -21,17 +21,44 @@ from .ranker import hybrid_rank, compute_match_details
 logger = logging.getLogger(__name__)
 
 
-def _vectorize(text: str) -> Optional[List[float]]:
-    """Encode text to a normalized embedding."""
+def _vectorize(text: str, batch_texts: Optional[List[str]] = None) -> Optional[List[float]]:
+    """
+    Encode text to a normalized embedding.
+    
+    Supports batch encoding for efficiency when multiple texts need embedding.
+    
+    Args:
+        text: Primary text to encode
+        batch_texts: Optional list of additional texts to encode in same batch
+    
+    Returns:
+        Single embedding (or list if batch_texts provided)
+    """
     try:
         enc = get_encoder()
-        # Add e5 query prefix
-        query_text = f"query: {text}"
-        return enc.encode([query_text], normalize_embeddings=True, show_progress_bar=False)[0].tolist()
+        
+        if batch_texts:
+            # Batch encode multiple texts
+            all_texts = [f"query: {t}" for t in [text] + batch_texts]
+            embeddings = enc.encode(
+                all_texts,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                batch_size=len(all_texts)
+            )
+            return [emb.tolist() for emb in embeddings]
+        else:
+            # Single text
+            query_text = f"query: {text}"
+            return enc.encode(
+                [query_text],
+                normalize_embeddings=True,
+                show_progress_bar=False
+            )[0].tolist()
+            
     except Exception as exc:
         logger.warning("Embedding failed: %s", exc)
         return None
-
 
 def search_candidates_v2(
     query: str,
