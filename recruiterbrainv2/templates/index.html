@@ -475,6 +475,22 @@
         <p class="subtitle">Intelligent candidate search powered by hybrid AI</p>
         <span class="version-badge">V2.0 - Simplified Architecture</span>
       </header>
+      <!-- Resume Upload Panel -->
+<section class="panel">
+    <div class="panel-header">📤 Upload Resume</div>
+    <div class="panel-row">
+      <input
+        id="resume-file-input"
+        type="file"
+        accept=".pdf,.docx,.doc,.txt,.zip"
+      />
+      <button id="upload-resume-btn" type="button">Upload</button>
+    </div>
+    <p class="panel-hint">
+      Upload PDF, DOCX, TXT, or ZIP. Resume will be parsed, analyzed, and indexed into Milvus.
+    </p>
+    <div id="upload-status" style="margin-top: 0.5rem; font-size: 0.9rem"></div>
+  </section>
 
       <!-- Stats Bar -->
       <div class="stats-bar" id="stats-bar">
@@ -617,6 +633,10 @@
       const insightTable = document.getElementById("insight-table");
       const insightRows = document.getElementById("insight-rows");
       const closeInsightBtn = document.getElementById("close-insight");
+      const resumeFileInput = document.getElementById("resume-file-input");
+      const uploadResumeBtn = document.getElementById("upload-resume-btn");
+      const uploadStatus = document.getElementById("upload-status");
+
 
       // ==================== TOGGLE HANDLERS ====================
       viewToggle.addEventListener("click", () => {
@@ -877,6 +897,54 @@
 
       // Focus input on load
       questionInput.focus();
+      uploadResumeBtn.addEventListener("click", async () => {
+        const file = resumeFileInput.files[0];
+        if (!file) {
+          alert("Please select a file");
+          return;
+        }
+      
+        const formData = new FormData();
+        formData.append("file", file);
+      
+        uploadResumeBtn.disabled = true;
+        uploadResumeBtn.textContent = "Uploading...";
+        uploadStatus.textContent = "⏳ Processing resume...";
+        uploadStatus.style.color = "var(--text-muted)";
+      
+        try {
+          const response = await fetch("/v2/upload_resume", {
+            method: "POST",
+            body: formData,
+          });
+      
+          if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || "Upload failed");
+          }
+      
+          const data = await response.json();
+          
+          uploadStatus.textContent = `✅ ${data.message} (ID: ${data.candidate_id})`;
+          uploadStatus.style.color = "var(--success)";
+          
+          resumeFileInput.value = "";
+          
+          // Add success message to chat
+          addMessage(
+            `Resume uploaded successfully!\nCandidate: ${data.name}\nID: ${data.candidate_id}`,
+            "bot"
+          );
+          
+        } catch (err) {
+          console.error(err);
+          uploadStatus.textContent = `❌ ${err.message}`;
+          uploadStatus.style.color = "var(--error)";
+        } finally {
+          uploadResumeBtn.disabled = false;
+          uploadResumeBtn.textContent = "Upload";
+        }
+      });
     </script>
   </body>
 </html>

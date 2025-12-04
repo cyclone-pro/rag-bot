@@ -1,8 +1,9 @@
 """FastAPI entrypoint for RecruiterBrain v2."""
 from __future__ import annotations
 import os
+import sys
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -10,10 +11,18 @@ from typing import Any, Dict, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from fastapi import UploadFile, File
 
 from .formatter import format_for_chat, format_for_insight
 from .retrieval_engine import search_candidates_v2
-
+from .ingestion import (
+    parse_file,
+    scrub_pii,
+    merge_pii,
+    extract_resume_data,
+    generate_embeddings,
+    insert_candidate,
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="RecruiterBrain v2")
@@ -23,7 +32,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # Print to console
+        logging.FileHandler('recruiterbrainv2.log')  # Also save to file
+    ]
+)
 
+# Set specific loggers
+logging.getLogger('recruiterbrainv2').setLevel(logging.INFO)
+logging.getLogger('pymilvus').setLevel(logging.WARNING)  # Reduce Milvus noise
+logging.getLogger('sentence_transformers').setLevel(logging.WARNING)  # Reduce embedding noise
+
+logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(__file__)
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
@@ -57,7 +80,7 @@ def rate_limiter(request: Request) -> None:
 
 # ---- Schemas ----
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=5000)
+    question: str = Field(..., min_length=1, max_length=10000)
     filters: Optional[Dict[str, Any]] = None
     show_contacts: bool = False
 
@@ -81,7 +104,11 @@ class InsightResponse(BaseModel):
     data_quality_banner: Optional[str] = None
     error: Optional[str] = None
 
-
+class ResumeUploadResponse(BaseModel):
+    candidate_id: str
+    name: str
+    status: str
+    message: str
 # ---- Endpoints ----
 @app.get("/")
 def root() -> Dict[str, str]:
@@ -147,7 +174,110 @@ def insight_v2_endpoint(payload: InsightRequest, _: None = Depends(rate_limiter)
         logger.exception("V2 insight error")
         return InsightResponse(error=str(exc)).model_dump()
 
+@app.post("/v2/upload_resume", response_model=ResumeUploadResponse)
+async def upload_resume(
+    file: UploadFile = File(...),
+    _: None = Depends(rate_limiter),
+) -> Dict[str, Any]:
+    """
+    Upload and ingest a resume (PDF/DOCX/ZIP).
+    
+    Pipeline:
+    1. Parse file → extract text
+    2. Scrub PII → remove sensitive data
+    3. LLM extraction → structured data
+    4. Merge PII back
+    5. Generate 3 embeddings
+    6. Insert into Milvus
+    """
+    filename = file.filename or "unknown.pdf"
+    
+    logger.info("="*60)
+    logger.info(f"📤 RESUME UPLOAD STARTED: {filename}")
+    logger.info("="*60)
+    
+    try:
+        # Step 0: Read file bytes
+        logger.info("Step 0: Reading file bytes...")
+        file_bytes = await file.read()
+        file_size_mb = len(file_bytes) / (1024 * 1024)
+        logger.info(f"✅ File read complete: {file_size_mb:.2f} MB")
+        
+        # Step 1: Parse file
+        logger.info(f"Step 1: Parsing file ({filename})...")
+        resume_text = parse_file(filename, file_bytes)
+        logger.info(f"✅ Text extracted: {len(resume_text)} characters")
+        
+        if len(resume_text) < 100:
+            logger.error(f"❌ Resume text too short: {len(resume_text)} chars")
+            raise ValueError("Resume text too short. Please upload a valid resume.")
+        
+        # Step 2: Scrub PII
+        logger.info("Step 2: Scrubbing PII from resume text...")
+        sanitized_text, pii = scrub_pii(resume_text)
+        logger.info(f"✅ PII scrubbed: {len(pii)} fields removed ({list(pii.keys())})")
+        logger.info(f"   Sanitized text length: {len(sanitized_text)} chars")
+        
+        # Step 3: Extract data with LLM
+        logger.info("Step 3: Sending sanitized text to LLM for extraction...")
+        logger.info(f"   Text preview: {sanitized_text[:200]}...")
+        extracted_data = extract_resume_data(sanitized_text)
+        logger.info(f"✅ LLM extraction complete")
+        logger.info(f"   Candidate name: {extracted_data.get('name', 'Unknown')}")
+        logger.info(f"   Career stage: {extracted_data.get('career_stage', 'Unknown')}")
+        logger.info(f"   Skills found: {len(extracted_data.get('skills_extracted', '').split(','))}")
+        
+        # Step 4: Merge PII back
+        logger.info("Step 4: Merging PII back into extracted data...")
+        complete_data = merge_pii(extracted_data, pii)
+        logger.info(f"✅ PII merged back")
+        logger.info(f"   Email: {complete_data.get('email', 'None')}")
+        logger.info(f"   Phone: {complete_data.get('phone', 'None')}")
+        
+        # Step 5: Generate embeddings
+        logger.info("Step 5: Generating 3 embeddings (summary, tech, role)...")
+        embeddings = generate_embeddings(complete_data)
+        logger.info(f"✅ Embeddings generated:")
+        logger.info(f"   summary_embedding: {len(embeddings['summary_embedding'])} dimensions")
+        logger.info(f"   tech_embedding: {len(embeddings['tech_embedding'])} dimensions")
+        logger.info(f"   role_embedding: {len(embeddings['role_embedding'])} dimensions")
+        
+        # Step 6: Insert into Milvus
+        logger.info("Step 6: Inserting candidate into Milvus...")
+        candidate_id = insert_candidate(complete_data, embeddings, source_channel="Upload")
+        logger.info(f"✅ Candidate inserted: {candidate_id}")
+        
+        logger.info("="*60)
+        logger.info(f"✅ UPLOAD COMPLETE: {complete_data.get('name')} ({candidate_id})")
+        logger.info("="*60)
+        
+        return ResumeUploadResponse(
+            candidate_id=candidate_id,
+            name=complete_data.get("name", "Unknown"),
+            status="success",
+            message=f"Resume successfully ingested for {complete_data.get('name')}"
+        ).model_dump()
+        
+    except ValueError as e:
+        logger.error(f"❌ Validation error: {e}")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": str(e)}
+        )
+    
+    except Exception as e:
+        logger.exception(f"❌ UPLOAD FAILED: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Upload failed: {str(e)}"}
+        )
 
+@app.post("/v2/ingest_resume", response_model=ResumeUploadResponse)
+async def ingest_resume(
+    file: UploadFile = File(...),
+    _: None = Depends(rate_limiter),
+) -> Dict[str, Any]:
+    return await upload_resume(file, _)
 if __name__ == "__main__":
     import uvicorn
 

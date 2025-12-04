@@ -1,4 +1,4 @@
-"""Core hybrid retrieval engine."""
+"""Core hybrid retrieval engine - optimized for candidates_v3."""
 import logging
 from typing import List, Dict, Any, Optional
 from .config import (
@@ -25,18 +25,12 @@ def _vectorize(text: str) -> Optional[List[float]]:
     """Encode text to a normalized embedding."""
     try:
         enc = get_encoder()
-        return enc.encode([text], normalize_embeddings=True, show_progress_bar=False)[0].tolist()
+        # Add e5 query prefix
+        query_text = f"query: {text}"
+        return enc.encode([query_text], normalize_embeddings=True, show_progress_bar=False)[0].tolist()
     except Exception as exc:
         logger.warning("Embedding failed: %s", exc)
         return None
-
-
-def _score_from_distance(distance: Any) -> float:
-    """Convert Milvus distance to similarity (higher is better)."""
-    try:
-        return 1.0 - float(distance)
-    except Exception:
-        return 0.0
 
 
 def search_candidates_v2(
@@ -46,9 +40,9 @@ def search_candidates_v2(
     industry: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Simple function-based search interface.
+    Main search function for candidates_v3 collection.
     
-    This is the main entry point for V2 search.
+    Uses 3 embeddings: summary, tech, role for optimal matching.
     """
     # ==================== VALIDATION ====================
     query = query.strip()
@@ -141,21 +135,36 @@ def search_candidates_v2(
     for candidate, score in ranked[:top_k]:
         match_details = compute_match_details(candidate, required_skills)
         
+        # Build clean location string
+        location_parts = [
+            candidate.get("location_city"),
+            candidate.get("location_state"),
+            candidate.get("location_country")
+        ]
+        location = ", ".join([p for p in location_parts if p])
+        
         top_candidates.append({
             "candidate_id": candidate.get("candidate_id"),
             "name": candidate.get("name", "Unknown"),
             "email": candidate.get("email"),
             "phone": candidate.get("phone"),
             "linkedin_url": candidate.get("linkedin_url"),
+            "github_url": candidate.get("github_url"),
+            "portfolio_url": candidate.get("portfolio_url"),
             "career_stage": candidate.get("career_stage"),
-            "primary_industry": candidate.get("primary_industry"),
+            "industries_worked": candidate.get("industries_worked"),
+            "primary_industry": candidate.get("industries_worked", "").split(",")[0].strip() if candidate.get("industries_worked") else "",
             "total_experience_years": candidate.get("total_experience_years"),
+            "management_experience_years": candidate.get("management_experience_years"),
+            "location": location,
             "location_city": candidate.get("location_city"),
             "location_state": candidate.get("location_state"),
             "location_country": candidate.get("location_country"),
             "match": match_details,
             "skills": candidate.get("skills_extracted", ""),
             "tools": candidate.get("tools_and_technologies", ""),
+            "current_tech_stack": candidate.get("current_tech_stack", ""),
+            "role_type": candidate.get("role_type", ""),
             "summary": (candidate.get("semantic_summary", "") or "")[:300],
         })
     
@@ -182,8 +191,8 @@ def _hybrid_search(
     
     logger.info("Keyword search found %d candidates", len(keyword_candidates))
     
-    # Part 2: Vector search
-    vector_candidates = _vector_search(query, filter_expr, vector, VECTOR_TOP_K)
+    # Part 2: Vector search (use tech_embedding for skill-heavy queries)
+    vector_candidates = _vector_search(query, filter_expr, vector, VECTOR_TOP_K, use_field="tech_embedding")
     
     # Part 3: Merge (keyword first)
     merged = list(keyword_candidates)
@@ -212,8 +221,11 @@ def _keyword_search(
     skill_conditions = []
     for skill in skills[:7]:  # Top 7 skills
         safe_skill = skill.replace('"', '""')
+        # Search in multiple fields
         skill_conditions.append(
-            f'(skills_extracted like "%{safe_skill}%" or tools_and_technologies like "%{safe_skill}%")'
+            f'(skills_extracted like "%{safe_skill}%" or '
+            f'tools_and_technologies like "%{safe_skill}%" or '
+            f'tech_stack_primary like "%{safe_skill}%")'
         )
     
     keyword_expr = " or ".join(skill_conditions)
@@ -245,6 +257,7 @@ def _vector_search(
     filter_expr: Optional[str],
     vector: List[float],
     limit: int,
+    use_field: str = "summary_embedding"
 ) -> List[Dict[str, Any]]:
     """Pure vector search."""
     
@@ -253,7 +266,7 @@ def _vector_search(
     search_params = {
         "collection_name": COLLECTION,
         "data": [vector],
-        "anns_field": "summary_embedding",
+        "anns_field": use_field,  # Can be summary_embedding, tech_embedding, or role_embedding
         "search_params": {
             "metric_type": METRIC,
             "params": {"ef": EF_SEARCH}
@@ -311,9 +324,9 @@ def _build_filter(
         except ValueError:
             logger.warning("Unknown career stage: %s", career_stage)
     
-    # Industry
+    # Industry (search in industries_worked field)
     if industry:
         safe_ind = industry.replace('"', '""')
-        filters.append(f'primary_industry == "{safe_ind}"')
+        filters.append(f'industries_worked like "%{safe_ind}%"')
     
     return " and ".join(filters) if filters else None

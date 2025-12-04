@@ -1,46 +1,31 @@
-"""V2 Configuration - Simplified and production-ready."""
-import logging
+"""V2 Configuration - Optimized for candidates_v3."""
 import os
-from functools import lru_cache
 from pathlib import Path
+import logging
+from functools import lru_cache
 from typing import Optional
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-
-def _load_env_files() -> None:
-    """Load environment variables from .env files if python-dotenv is installed."""
-    try:
-        from dotenv import load_dotenv
-    except Exception:
-        logger.debug("python-dotenv not installed; skipping .env load")
-        return
-
-    base_dir = Path(__file__).resolve().parent
-    candidates = [
-        base_dir / ".env",               # recruiterbrainv2/.env
-        base_dir.parent / ".env",        # repo-level .env
-    ]
-    loaded_any = False
-    for env_path in candidates:
-        if env_path.exists():
-            load_dotenv(env_path, override=False)
-            loaded_any = True
-            logger.info("Loaded environment from %s", env_path)
-
-    if not loaded_any:
-        logger.debug("No .env file found alongside recruiterbrainv2")
-
-
-# Ensure .env is loaded before reading values
-_load_env_files()
+# ========================
+# LOAD LOCAL .ENV FILE
+# ========================
+BASE_DIR = Path(__file__).resolve().parent
+env_path = BASE_DIR / '.env'
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path, override=True)
+    logger.info(f"✅ Loaded .env from: {env_path}")
+else:
+    logger.warning(f"⚠️  .env not found at: {env_path}, using root .env")
+    load_dotenv()
 
 # ========================
 # Environment
 # ========================
 MILVUS_URI = os.getenv("MILVUS_URI")
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "")
-COLLECTION = os.getenv("MILVUS_COLLECTION", "new_candidate_pool")
+COLLECTION = os.getenv("MILVUS_COLLECTION", "candidates_v3")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "intfloat/e5-base-v2")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -72,31 +57,68 @@ CAREER_STAGES = [
 ]
 
 # ========================
-# Milvus Schema Fields
+# Milvus Schema Fields for candidates_v3
 # ========================
-# Based on your screenshots
 SEARCH_OUTPUT_FIELDS = [
+    # Identity
     "candidate_id",
     "name",
     "email",
     "phone",
     "linkedin_url",
+    "portfolio_url",
+    "github_url",
+    
+    # Location
     "location_city",
     "location_state",
     "location_country",
+    "relocation_willingness",
+    "remote_preference",
+    "availability_status",
+    
+    # Experience & Education
     "total_experience_years",
     "education_level",
-    "primary_industry",
-    "sub_industries",
+    "degrees",
+    "institutions",
+    "languages_spoken",
+    "management_experience_years",
+    
+    # Career & Role
+    "career_stage",
+    "years_in_current_role",
+    "top_3_titles",
+    "role_type",
+    
+    # Industry & Domain
+    "industries_worked",
+    "domain_expertise",
+    "verticals_experience",
+    
+    # Technical Skills
     "skills_extracted",
     "tools_and_technologies",
     "certifications",
-    "domains_of_expertise",
-    "top_titles_mentioned",
+    "tech_stack_primary",
+    "programming_languages",
+    
+    # Evidence & Summaries
     "employment_history",
     "semantic_summary",
     "keywords_summary",
-    "career_stage",
+    "evidence_skills",
+    "evidence_projects",
+    "evidence_leadership",
+    
+    # Recency & Depth
+    "current_tech_stack",
+    "years_since_last_update",
+    "top_5_skills_with_years",
+    
+    # Metadata
+    "source_channel",
+    "last_updated",
 ]
 
 # ========================
@@ -107,16 +129,31 @@ def get_milvus_client():
     """Get Milvus client (singleton)."""
     if not MILVUS_URI:
         raise RuntimeError("MILVUS_URI not configured")
+    
     from pymilvus import MilvusClient
-    logger.info("Initializing Milvus client for %s", COLLECTION)
-    return MilvusClient(uri=MILVUS_URI, token=MILVUS_TOKEN)
+    
+    logger.info(f"Initializing Milvus client for {COLLECTION}")
+    
+    # Handle different Milvus types
+    if MILVUS_TOKEN or "zillizcloud.com" in MILVUS_URI:
+        # Milvus Cloud (Zilliz)
+        uri = MILVUS_URI.replace("http://", "").replace("https://", "")
+        if not uri.startswith("https://"):
+            uri = f"https://{uri}"
+        
+        logger.info(f"Using Zilliz Cloud: {uri}")
+        return MilvusClient(uri=uri, token=MILVUS_TOKEN, secure=True)
+    else:
+        # Local Milvus
+        logger.info(f"Using local Milvus: {MILVUS_URI}")
+        return MilvusClient(uri=MILVUS_URI)
 
 
 @lru_cache(maxsize=1)
 def get_encoder():
     """Get embedding model (singleton)."""
     from sentence_transformers import SentenceTransformer
-    logger.info("Loading embedding model: %s", EMBED_MODEL)
+    logger.info(f"Loading embedding model: {EMBED_MODEL}")
     return SentenceTransformer(EMBED_MODEL)
 
 
