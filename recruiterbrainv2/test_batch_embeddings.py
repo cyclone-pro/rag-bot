@@ -1,6 +1,6 @@
 """Test batch embedding performance."""
 import time
-from recruiterbrainv2.ingestion.embedding_generator import generate_embeddings
+from ingestion.embedding_generator import generate_embeddings
 
 # Mock candidate data
 candidate_data = {
