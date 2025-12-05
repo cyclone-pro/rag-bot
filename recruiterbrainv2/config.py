@@ -29,7 +29,13 @@ COLLECTION = os.getenv("MILVUS_COLLECTION", "candidates_v3")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "intfloat/e5-base-v2")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
+# ========================
+# Cache Configuration 
+# ========================
+REDIS_URL = os.getenv("REDIS_URL", "")  # e.g., redis://localhost:6379/0
+ENABLE_CACHE = os.getenv("ENABLE_CACHE", "true").lower() == "true"
+LLM_CACHE_TTL = int(os.getenv("LLM_CACHE_TTL", "3600"))      # 1 hour
+SEARCH_CACHE_TTL = int(os.getenv("SEARCH_CACHE_TTL", "300"))  # 5 minutes
 # ========================
 # Search Parameters
 # ========================

@@ -1,4 +1,4 @@
-"""Core hybrid retrieval engine - optimized for candidates_v3."""
+"""Core hybrid retrieval engine - optimized for candidates_v3 WITH CACHING."""
 import logging
 from typing import List, Dict, Any, Optional
 from .config import (
@@ -14,9 +14,12 @@ from .config import (
     KEYWORD_WEIGHT,
     CAREER_STAGES,
     SEARCH_OUTPUT_FIELDS,
+    ENABLE_CACHE,
+    SEARCH_CACHE_TTL,
 )
 from .skill_extractor import extract_requirements
 from .ranker import hybrid_rank, compute_match_details
+from .cache import generate_cache_key, get_cache
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,7 @@ def _vectorize(text: str, batch_texts: Optional[List[str]] = None) -> Optional[L
         logger.warning("Embedding failed: %s", exc)
         return None
 
+
 def search_candidates_v2(
     query: str,
     top_k: int = 10,
@@ -67,15 +71,39 @@ def search_candidates_v2(
     industry: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Main search function for candidates_v3 collection.
+    Main search function for candidates_v3 collection WITH CACHING.
+    
+    Cache Strategy:
+    - Cache key: hash(query + filters + top_k)
+    - TTL: 5 minutes (configurable via SEARCH_CACHE_TTL)
+    - Returns cached results instantly if available
     
     Uses 3 embeddings: summary, tech, role for optimal matching.
     """
+    # ==================== CACHE CHECK ====================
+    if ENABLE_CACHE:
+        cache_key = generate_cache_key(
+            "search_v2",
+            query=query,
+            top_k=top_k,
+            career_stage=career_stage or "",
+            industry=industry or ""
+        )
+        
+        cache = get_cache()
+        cached_result = cache.get(cache_key)
+        
+        if cached_result:
+            logger.info("✅ Search cache HIT - returning cached results instantly")
+            return cached_result
+        
+        logger.info("⚠️  Search cache MISS - performing full search...")
+    
     # ==================== VALIDATION ====================
     query = query.strip()
     
     if len(query) < 10:
-        return {
+        error_response = {
             "query": query,
             "requirements": {},
             "search_mode": "error",
@@ -83,6 +111,8 @@ def search_candidates_v2(
             "candidates": [],
             "error": "Query too short. Please provide more details (e.g., 'Find Python developers with Django')"
         }
+        # Don't cache errors
+        return error_response
     
     # Check for greetings
     greeting_patterns = [
@@ -92,7 +122,7 @@ def search_candidates_v2(
     
     query_lower = query.lower()
     if any(pattern in query_lower for pattern in greeting_patterns) and len(query) < 50:
-        return {
+        error_response = {
             "query": query,
             "requirements": {},
             "search_mode": "error",
@@ -100,19 +130,25 @@ def search_candidates_v2(
             "candidates": [],
             "error": "👋 Hi! Please ask a recruiting question like: 'Find Salesforce developers with Apex experience'"
         }
+        # Don't cache greetings
+        return error_response
     
-    # ==================== EXTRACT REQUIREMENTS ====================
-    requirements = extract_requirements(query)
+    # ==================== EXTRACT REQUIREMENTS (CACHED INTERNALLY) ====================
+    requirements = extract_requirements(query)  # This is already cached in skill_extractor.py!
     required_skills = requirements.get("must_have_skills", [])
     detected_seniority = requirements.get("seniority_level", "Any")
+    detected_industry = requirements.get("industry")
     
-    # Use detected seniority if not provided
+    # Use detected values if not explicitly provided
     if not career_stage or career_stage == "Any":
         career_stage = detected_seniority
     
+    if not industry and detected_industry:
+        industry = detected_industry
+    
     # Require at least 1 skill (unless filters provided)
     if not required_skills and not career_stage and not industry:
-        return {
+        error_response = {
             "query": query,
             "requirements": requirements,
             "search_mode": "error",
@@ -120,6 +156,8 @@ def search_candidates_v2(
             "candidates": [],
             "error": "❌ No technical skills detected. Try: 'Find Python developers' or 'Senior Salesforce engineers with Apex'"
         }
+        # Don't cache errors
+        return error_response
     
     # ==================== VECTORIZE ====================
     vector = _vectorize(query)
@@ -130,10 +168,13 @@ def search_candidates_v2(
     filter_expr = _build_filter(career_stage, industry)
     
     # ==================== DECIDE SEARCH MODE ====================
-    use_hybrid = len(required_skills) >= 5
+    # Use hybrid mode if 5+ skills OR if specific role type detected
+    use_hybrid = len(required_skills) >= 5 or requirements.get("role_type")
     
     if use_hybrid:
-        logger.info("Using HYBRID mode (%d skills)", len(required_skills))
+        logger.info("Using HYBRID mode (%d skills, role=%s)", 
+                   len(required_skills), 
+                   requirements.get("role_type", "N/A"))
         results = _hybrid_search(query, required_skills, filter_expr, vector)
         search_mode = "hybrid"
     else:
@@ -142,12 +183,17 @@ def search_candidates_v2(
         search_mode = "vector_only"
     
     if not results:
-        return {
+        no_results_response = {
             "candidates": [],
             "total_found": 0,
             "requirements": requirements,
             "search_mode": search_mode,
+            "query": query,
         }
+        # Cache "no results" for 1 minute (shorter TTL)
+        if ENABLE_CACHE:
+            cache.set(cache_key, no_results_response, ttl=60)
+        return no_results_response
     
     # ==================== HYBRID RANKING ====================
     ranked = hybrid_rank(
@@ -195,13 +241,20 @@ def search_candidates_v2(
             "summary": (candidate.get("semantic_summary", "") or "")[:300],
         })
     
-    return {
+    final_result = {
         "candidates": top_candidates,
         "total_found": len(results),
         "requirements": requirements,
         "search_mode": search_mode,
         "query": query,
     }
+    
+    # ==================== CACHE RESULT ====================
+    if ENABLE_CACHE:
+        cache.set(cache_key, final_result, ttl=SEARCH_CACHE_TTL)
+        logger.info(f"✅ Cached search result for {SEARCH_CACHE_TTL}s")
+    
+    return final_result
 
 
 def _hybrid_search(
@@ -210,8 +263,12 @@ def _hybrid_search(
     filter_expr: Optional[str],
     vector: List[float],
 ) -> List[Dict[str, Any]]:
-    """Hybrid: keyword + vector."""
+    """
+    Hybrid search: keyword + vector.
     
+    Keyword search finds exact skill matches.
+    Vector search finds semantic matches.
+    """
     # Part 1: Keyword search
     keyword_candidates = _keyword_search(required_skills, filter_expr, KEYWORD_TOP_K)
     keyword_ids = {c["candidate_id"] for c in keyword_candidates}
@@ -221,7 +278,9 @@ def _hybrid_search(
     # Part 2: Vector search (use tech_embedding for skill-heavy queries)
     vector_candidates = _vector_search(query, filter_expr, vector, VECTOR_TOP_K, use_field="tech_embedding")
     
-    # Part 3: Merge (keyword first)
+    logger.info("Vector search found %d candidates", len(vector_candidates))
+    
+    # Part 3: Merge (keyword first - they have exact matches)
     merged = list(keyword_candidates)
     
     for vc in vector_candidates:
@@ -238,29 +297,43 @@ def _keyword_search(
     filter_expr: Optional[str],
     limit: int,
 ) -> List[Dict[str, Any]]:
-    """Keyword-based search using Milvus scalar filters."""
+    """
+    Keyword-based search using Milvus scalar filters.
+    
+    Searches across multiple fields:
+    - skills_extracted
+    - tools_and_technologies
+    - tech_stack_primary
+    - current_tech_stack (NEW in v3)
+    """
     if not skills:
         return []
     
     client = get_milvus_client()
     
-    # Build OR condition for skills
+    # Build OR condition for skills (search top 7 most important)
     skill_conditions = []
-    for skill in skills[:7]:  # Top 7 skills
-        safe_skill = skill.replace('"', '""')
-        # Search in multiple fields
+    for skill in skills[:7]:
+        # Escape quotes for Milvus filter syntax
+        safe_skill = skill.replace('"', '""').replace("'", "''")
+        
+        # Search in multiple fields (candidates_v3 schema)
         skill_conditions.append(
             f'(skills_extracted like "%{safe_skill}%" or '
             f'tools_and_technologies like "%{safe_skill}%" or '
-            f'tech_stack_primary like "%{safe_skill}%")'
+            f'tech_stack_primary like "%{safe_skill}%" or '
+            f'current_tech_stack like "%{safe_skill}%")'
         )
     
     keyword_expr = " or ".join(skill_conditions)
     
+    # Combine with filter expression (career stage, industry)
     if filter_expr:
         keyword_expr = f"({filter_expr}) and ({keyword_expr})"
     
     try:
+        logger.debug(f"Keyword filter: {keyword_expr[:200]}...")
+        
         results = client.query(
             collection_name=COLLECTION,
             filter=keyword_expr,
@@ -268,14 +341,16 @@ def _keyword_search(
             limit=limit,
         )
         
-        # Add dummy vector score
+        # Add high vector score for keyword matches (they're exact matches)
         for r in results:
-            r['vector_score'] = 0.9  # High score for exact matches
+            r['vector_score'] = 0.95  # High score for exact matches
+        
+        logger.debug(f"Keyword search returned {len(results)} results")
         
         return results
         
     except Exception as e:
-        logger.warning("Keyword search failed: %s", e)
+        logger.warning(f"Keyword search failed: {e}")
         return []
 
 
@@ -286,14 +361,25 @@ def _vector_search(
     limit: int,
     use_field: str = "summary_embedding"
 ) -> List[Dict[str, Any]]:
-    """Pure vector search."""
+    """
+    Pure vector search using ANN (Approximate Nearest Neighbor).
     
+    Args:
+        query: Original search query (for logging)
+        filter_expr: Milvus filter expression (career stage, industry)
+        vector: Query embedding vector
+        limit: Number of results to return
+        use_field: Which embedding to search against
+            - "summary_embedding": General semantic search
+            - "tech_embedding": Skill-focused search (better for technical queries)
+            - "role_embedding": Role/industry-focused search
+    """
     client = get_milvus_client()
     
     search_params = {
         "collection_name": COLLECTION,
         "data": [vector],
-        "anns_field": use_field,  # Can be summary_embedding, tech_embedding, or role_embedding
+        "anns_field": use_field,
         "search_params": {
             "metric_type": METRIC,
             "params": {"ef": EF_SEARCH}
@@ -306,18 +392,22 @@ def _vector_search(
         search_params["filter"] = filter_expr
     
     try:
+        logger.debug(f"Vector search using {use_field}, limit={limit}")
+        
         results = client.search(**search_params)
         
         if not results or not results[0]:
+            logger.debug("Vector search returned no results")
             return []
         
         candidates = []
         for hit in results[0]:
-            # Handle both dict and object responses
+            # Handle both dict and object responses from Milvus
             if isinstance(hit, dict):
                 entity = hit.get("entity", {})
                 distance = hit.get("distance", 0)
             else:
+                # Extract fields from object
                 entity = {
                     field: getattr(hit, field, None)
                     for field in SEARCH_OUTPUT_FIELDS
@@ -327,10 +417,12 @@ def _vector_search(
             entity["vector_score"] = float(distance)
             candidates.append(entity)
         
+        logger.debug(f"Vector search returned {len(candidates)} candidates")
+        
         return candidates
         
     except Exception as e:
-        logger.exception("Vector search failed: %s", e)
+        logger.exception(f"Vector search failed: {e}")
         return []
 
 
@@ -338,22 +430,60 @@ def _build_filter(
     career_stage: Optional[str],
     industry: Optional[str],
 ) -> Optional[str]:
-    """Build Milvus filter expression."""
+    """
+    Build Milvus filter expression for career stage and industry.
+    
+    Career stage uses seniority hierarchy:
+    - If user asks for "Senior", also include "Lead/Manager" and "Director+"
+    - This ensures we don't filter out over-qualified candidates
+    
+    Industry uses partial string matching:
+    - Searches in industries_worked field (comma-separated list)
+    """
     filters = []
     
-    # Career stage
+    # Career stage filter (hierarchical)
     if career_stage and career_stage != "Any":
         try:
             min_index = CAREER_STAGES.index(career_stage)
             allowed = CAREER_STAGES[min_index:]
             stage_list = ",".join(f'"{s}"' for s in allowed)
             filters.append(f"career_stage in [{stage_list}]")
+            logger.debug(f"Career stage filter: {career_stage} -> {allowed}")
         except ValueError:
-            logger.warning("Unknown career stage: %s", career_stage)
+            logger.warning(f"Unknown career stage: {career_stage}")
     
-    # Industry (search in industries_worked field)
+    # Industry filter (partial match in industries_worked)
     if industry:
-        safe_ind = industry.replace('"', '""')
+        safe_ind = industry.replace('"', '""').replace("'", "''")
         filters.append(f'industries_worked like "%{safe_ind}%"')
+        logger.debug(f"Industry filter: {industry}")
     
-    return " and ".join(filters) if filters else None
+    filter_expr = " and ".join(filters) if filters else None
+    
+    if filter_expr:
+        logger.debug(f"Final filter: {filter_expr}")
+    
+    return filter_expr
+
+
+def invalidate_search_cache():
+    """
+    Invalidate all search cache entries.
+    
+    Call this when:
+    - New resume uploaded
+    - Candidate data updated
+    - Collection modified
+    """
+    if not ENABLE_CACHE:
+        return
+    
+    cache = get_cache()
+    
+    
+    
+    #  log (cache will auto-expire in 5 min)
+    logger.info("ℹ️  Search cache will auto-expire in %d seconds", SEARCH_CACHE_TTL)
+    
+  

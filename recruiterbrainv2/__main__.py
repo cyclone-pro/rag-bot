@@ -250,6 +250,12 @@ async def upload_resume(
         logger.info("="*60)
         logger.info(f"✅ UPLOAD COMPLETE: {complete_data.get('name')} ({candidate_id})")
         logger.info("="*60)
+
+        # After successful insert:
+        candidate_id = insert_candidate(complete_data, embeddings, source_channel="Upload")
+        # Invalidate search cache
+        from .retrieval_engine import invalidate_search_cache
+        invalidate_search_cache()
         
         return ResumeUploadResponse(
             candidate_id=candidate_id,
