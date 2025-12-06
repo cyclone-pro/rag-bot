@@ -4,6 +4,9 @@ from pathlib import Path
 import logging
 from functools import lru_cache
 from typing import Optional
+from redis import Redis
+from concurrent.futures import ThreadPoolExecutor
+from .rate_limiter import RateLimitExceeded
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -50,6 +53,10 @@ EF_SEARCH = 128
 # Hybrid weights
 VECTOR_WEIGHT = 0.6       # Semantic
 KEYWORD_WEIGHT = 0.4      # Exact matching
+# Parallel Search Config
+# ========================
+ENABLE_PARALLEL_SEARCH = os.getenv("ENABLE_PARALLEL_SEARCH", "true").lower() == "true"
+SEARCH_THREAD_POOL_SIZE = int(os.getenv("SEARCH_THREAD_POOL_SIZE", "4"))
 
 # ========================
 # Career Stages (ordered by seniority)
@@ -126,7 +133,18 @@ SEARCH_OUTPUT_FIELDS = [
     "source_channel",
     "last_updated",
 ]
-
+# ========================
+# Thread Pool for Parallel Search
+# ========================
+@lru_cache(maxsize=1)
+def get_search_thread_pool() -> ThreadPoolExecutor:
+    """Get thread pool for parallel search operations."""
+    pool = ThreadPoolExecutor(
+        max_workers=SEARCH_THREAD_POOL_SIZE,
+        thread_name_prefix="search_worker"
+    )
+    logger.info(f"✅ Search thread pool initialized with {SEARCH_THREAD_POOL_SIZE} workers")
+    return pool
 # ========================
 # Lazy Clients
 # ========================
