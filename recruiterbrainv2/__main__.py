@@ -31,6 +31,7 @@ from .ingestion import (
     generate_embeddings,
     insert_candidate,
 )
+from .audio_transcription import transcribe_audio_whisper
 
 # ==================== LOGGING SETUP ====================
 logging.basicConfig(
@@ -692,6 +693,65 @@ async def rate_limit_handler(request: Request, exc):
         },
         headers={"Retry-After": retry_after}
     )
+@app.post("/v2/transcribe")
+async def transcribe_audio(
+    request: Request,
+    audio: UploadFile = File(...)
+) -> Dict[str, Any]:
+    """
+    Transcribe audio to text using Whisper API.
+    
+    Used for voice input in UI.
+    
+    Rate limit: 20 requests per minute (same as chat).
+    """
+    # Check rate limit
+    await check_rate_limit(request, "chat")  # Reuse chat limit
+    
+    filename = audio.filename or "audio.webm"
+    
+    logger.info(f"🎤 Audio transcription request: {filename}")
+    
+    try:
+        # Read audio bytes
+        audio_bytes = await audio.read()
+        file_size_kb = len(audio_bytes) / 1024
+        
+        # Validate size (max 25MB for Whisper)
+        if file_size_kb > 25 * 1024:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Audio file too large: {file_size_kb:.1f}KB (max 25MB)"
+            )
+        
+        logger.info(f"Audio size: {file_size_kb:.1f}KB")
+        
+        # Transcribe
+        transcription = transcribe_audio_whisper(audio_bytes, filename)
+        
+        if not transcription:
+            raise HTTPException(
+                status_code=500,
+                detail="Transcription failed. Please try again."
+            )
+        
+        logger.info(f"✅ Transcription: {transcription}")
+        
+        return {
+            "text": transcription,
+            "filename": filename,
+            "size_kb": round(file_size_kb, 1)
+        }
+        
+    except HTTPException:
+        raise
+    
+    except Exception as e:
+        logger.exception(f"Transcription error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Transcription failed: {str(e)}"
+        )
 # ==================== HEALTH CHECK ====================
 
 @app.get("/health")
