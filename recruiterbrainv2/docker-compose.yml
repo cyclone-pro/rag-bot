@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  # Redis (message broker + result backend)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+  
+  # FastAPI application
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - redis
+    command: uvicorn recruiterbrainv2.__main__:app --host 0.0.0.0 --port 8000
+  
+  # Celery workers (3 instances)
+  worker:
+    build: .
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - redis
+    command: celery -A recruiterbrainv2.celery_app worker --loglevel=info --concurrency=4
+    deploy:
+      replicas: 3  # 3 worker containers
+  
+  # Celery Beat (scheduler)
+  beat:
+    build: .
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - redis
+    command: celery -A recruiterbrainv2.celery_app beat --loglevel=info
+  
+  # Flower (monitoring)
+  flower:
+    build: .
+    ports:
+      - "5555:5555"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - redis
+    command: celery -A recruiterbrainv2.celery_app flower --port=5555
+
+volumes:
+  redis_data:

@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import logging
 import time
 from typing import Any, Dict, Optional
-
+import base64
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -15,7 +15,9 @@ from fastapi import UploadFile, File
 from fastapi import BackgroundTasks
 from .jobs import get_job_store, JobStatus
 from .workers import process_resume_upload
-
+from .celery_app import celery_app
+from .tasks import process_resume_task, bulk_process_resumes
+from .tasks import cleanup_old_jobs
 from .formatter import format_for_chat, format_for_insight
 from .retrieval_engine import search_candidates_v2
 from .ingestion import (
@@ -419,3 +421,158 @@ async def cancel_job(job_id: str):
     else:
         return {"message": f"Job {job_id} is already {job_data['status']}, cannot cancel"}
 
+@app.post("/v2/upload_resume_celery", response_model=AsyncResumeUploadResponse)
+async def upload_resume_celery(
+    file: UploadFile = File(...),
+    _: None = Depends(rate_limiter),
+) -> Dict[str, Any]:
+    """
+    Upload resume using Celery (production-grade async processing).
+    
+    Advantages over BackgroundTasks:
+    - Distributed workers
+    - Automatic retries
+    - Persistent queue (survives restarts)
+    - Monitoring with Flower
+    
+    Returns:
+        {
+            "job_id": "celery-task-id",
+            "status": "queued",
+            "message": "..."
+        }  """
+    filename = file.filename or "unknown.pdf"
+    
+    logger.info("="*60)
+    logger.info(f"📤 CELERY RESUME UPLOAD: {filename}")
+    logger.info("="*60)
+    
+    try:
+        # Read and validate file
+        file_bytes = await file.read()
+        file_size_mb = len(file_bytes) / (1024 * 1024)
+        
+        if file_size_mb > 10:
+            raise ValueError(f"File too large: {file_size_mb:.2f} MB (max 10 MB)")
+        
+        logger.info(f"✅ File validated: {file_size_mb:.2f} MB")
+        
+        # Encode file bytes to base64 (Celery can't serialize raw bytes)
+        file_bytes_b64 = base64.b64encode(file_bytes).decode('utf-8')
+        
+        # Submit to Celery
+        task = process_resume_task.apply_async(
+            kwargs={
+                "filename": filename,
+                "file_bytes_b64": file_bytes_b64,
+                "source_channel": "Upload"
+            },
+            queue="resume_processing"
+        )
+        
+        logger.info(f"✅ Celery task submitted: {task.id}")
+        
+        return AsyncResumeUploadResponse(
+            job_id=task.id,
+            status="queued",
+            message=f"Resume queued for processing. Check status at /v2/jobs/celery/{task.id}"
+        ).model_dump()
+        
+    except ValueError as e:
+        logger.error(f"❌ Validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    except Exception as e:
+        logger.exception(f"❌ Upload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        
+@app.get("/v2/jobs/celery/{task_id}")
+async def get_celery_job_status(task_id: str) -> Dict[str, Any]:
+    """
+    Get Celery task status.
+    
+    Status values:
+    - PENDING: Task waiting to be executed
+    - PROCESSING: Task is running
+    - SUCCESS: Task completed successfully
+    - FAILURE: Task failed
+    - RETRY: Task is being retried
+    """
+    from celery.result import AsyncResult
+    
+    task = AsyncResult(task_id, app=celery_app)
+    
+    response = {
+        "job_id": task_id,
+        "status": task.state,
+        "result": None,
+        "error": None,
+        "progress": None,
+    }
+    
+    if task.state == 'PENDING':
+        response["status"] = "queued"
+    
+    elif task.state == 'PROCESSING':
+        # Get progress info
+        if task.info:
+            response["progress"] = task.info.get("progress", 0)
+            response["status_message"] = task.info.get("status", "Processing...")
+    
+    elif task.state == 'SUCCESS':
+        response["status"] = "completed"
+        response["result"] = task.result
+    
+    elif task.state == 'FAILURE':
+        response["status"] = "failed"
+        response["error"] = str(task.info)
+    
+    elif task.state == 'RETRY':
+        response["status"] = "retrying"
+        response["error"] = str(task.info)
+    
+    return response
+
+
+@app.post("/v2/bulk_upload_resumes")
+async def bulk_upload_resumes(
+    files: list[UploadFile] = File(...),
+    _: None = Depends(rate_limiter),
+) -> Dict[str, Any]:
+    """
+    Upload multiple resumes at once.
+    
+    Processes them in parallel using Celery worker pool.
+    
+    Max 20 files per request.
+    """
+    import base64
+    
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 files per batch")
+    
+    logger.info(f"📤 BULK UPLOAD: {len(files)} files")
+    
+    resume_data = []
+    
+    for file in files:
+        file_bytes = await file.read()
+        file_bytes_b64 = base64.b64encode(file_bytes).decode('utf-8')
+        
+        resume_data.append({
+            "filename": file.filename or "unknown.pdf",
+            "file_bytes_b64": file_bytes_b64,
+        })
+    
+    # Submit bulk task
+    task = bulk_process_resumes.apply_async(
+        kwargs={"resume_files": resume_data},
+        queue="bulk_processing"
+    )
+    
+    return {
+        "job_id": task.id,
+        "status": "processing",
+        "total_files": len(files),
+        "message": f"Processing {len(files)} resumes in parallel"
+    }
