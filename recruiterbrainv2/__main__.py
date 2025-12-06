@@ -7,19 +7,22 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import logging
 import time
 from typing import Any, Dict, Optional
+from datetime import datetime, timedelta
 import base64
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from fastapi import UploadFile, File
 from fastapi import BackgroundTasks
+from fastapi import Response
+
 from .jobs import get_job_store, JobStatus
 from .workers import process_resume_upload
 from .celery_app import celery_app
 from .tasks import process_resume_task, bulk_process_resumes
-from .tasks import cleanup_old_jobs
 from .formatter import format_for_chat, format_for_insight
-from .retrieval_engine import search_candidates_v2
+from .retrieval_engine import search_candidates_v2, invalidate_search_cache
+from .rate_limiter import RateLimitExceeded, get_rate_limiter
 from .ingestion import (
     parse_file,
     scrub_pii,
@@ -28,62 +31,120 @@ from .ingestion import (
     generate_embeddings,
     insert_candidate,
 )
+
+# ==================== LOGGING SETUP ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('recruiterbrainv2.log')
+    ]
+)
+
+logging.getLogger('recruiterbrainv2').setLevel(logging.INFO)
+logging.getLogger('pymilvus').setLevel(logging.WARNING)
+logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="RecruiterBrain v2")
+# ==================== FASTAPI APP ====================
+app = FastAPI(title="RecruiterBrain v2", version="2.0.0")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),  # Print to console
-        logging.FileHandler('recruiterbrainv2.log')  # Also save to file
-    ]
-)
 
-# Set specific loggers
-logging.getLogger('recruiterbrainv2').setLevel(logging.INFO)
-logging.getLogger('pymilvus').setLevel(logging.WARNING)  # Reduce Milvus noise
-logging.getLogger('sentence_transformers').setLevel(logging.WARNING)  # Reduce embedding noise
-
-logger = logging.getLogger(__name__)
+# ==================== TEMPLATES ====================
 BASE_DIR = os.path.dirname(__file__)
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    logger.debug("Serving home page")
-    return templates.TemplateResponse("index.html", {"request": request})
 
-# ---- Simple in-process rate limiter ----
-_RATE_WINDOW_SECONDS = 60.0
-_RATE_MAX_REQUESTS = 60
-_rate_state: Dict[str, tuple[float, int]] = {}
+# ==================== RATE LIMITING ====================
 
-
-def _rate_key(request: Request) -> str:
-    return request.client.host if request and request.client else "unknown"
+# Rate limit configurations (requests, seconds)
+RATE_LIMITS = {
+    "chat": (20, 60),           # 20/minute
+    "insight": (10, 60),        # 10/minute
+    "upload": (5, 60),          # 5/minute
+    "bulk_upload": (1, 3600),   # 1/hour
+    "job_status": (60, 60),     # 60/minute
+}
 
 
-def rate_limiter(request: Request) -> None:
-    now = time.time()
-    key = _rate_key(request)
-    window_start, count = _rate_state.get(key, (now, 0))
-
-    if now - window_start > _RATE_WINDOW_SECONDS:
-        _rate_state[key] = (now, 1)
-        return
-    if count >= _RATE_MAX_REQUESTS:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again soon.")
-    _rate_state[key] = (window_start, count + 1)
+def get_client_ip(request: Request) -> str:
+    """Extract client IP from request."""
+    # Check X-Forwarded-For header (for proxies)
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    
+    # Fallback to direct client IP
+    return request.client.host if request.client else "unknown"
 
 
-# ---- Schemas ----
+async def check_rate_limit(request: Request, endpoint: str):
+    """
+    Check rate limit for endpoint.
+    
+    Raises HTTPException if limit exceeded.
+    """
+    if endpoint not in RATE_LIMITS:
+        return  # No limit for this endpoint
+    
+    limit, window = RATE_LIMITS[endpoint]
+    client_ip = get_client_ip(request)
+    rate_key = f"{endpoint}:{client_ip}"
+    
+    limiter = get_rate_limiter()
+    is_allowed, retry_after = limiter.check_limit(rate_key, limit, window)
+    
+    if not is_allowed:
+        logger.warning(
+            f"Rate limit exceeded: endpoint={endpoint}, ip={client_ip}, "
+            f"limit={limit}/{window}s, retry_after={retry_after}s"
+        )
+        
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "Rate limit exceeded",
+                "message": f"Too many requests to {endpoint}. Please slow down.",
+                "limit": limit,
+                "window": window,
+                "retry_after_seconds": retry_after,
+                "retry_at": (datetime.utcnow() + timedelta(seconds=retry_after)).isoformat() + "Z"
+            },
+            headers={"Retry-After": str(retry_after)}
+        )
+
+
+# ==================== CUSTOM ERROR HANDLERS ====================
+
+@app.exception_handler(429)
+async def rate_limit_exception_handler(request: Request, exc: HTTPException):
+    """Custom handler for 429 Rate Limit errors."""
+    
+    retry_after = exc.headers.get("Retry-After", "60")
+    
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "Rate Limit Exceeded",
+            "message": "You've made too many requests. Please slow down.",
+            "retry_after_seconds": int(retry_after),
+            "retry_at": (datetime.utcnow() + timedelta(seconds=int(retry_after))).isoformat() + "Z",
+            "details": exc.detail if hasattr(exc, 'detail') else None
+        },
+        headers={"Retry-After": retry_after}
+    )
+
+
+# ==================== PYDANTIC SCHEMAS ====================
+
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=10000)
     filters: Optional[Dict[str, Any]] = None
@@ -109,22 +170,21 @@ class InsightResponse(BaseModel):
     data_quality_banner: Optional[str] = None
     error: Optional[str] = None
 
+
 class ResumeUploadResponse(BaseModel):
     candidate_id: str
     name: str
     status: str
     message: str
-# ====================  ASYNC UPLOAD ENDPOINTS ====================
+
 
 class AsyncResumeUploadResponse(BaseModel):
-    """Response for async resume upload."""
     job_id: str
     status: str
     message: str
 
 
 class JobStatusResponse(BaseModel):
-    """Job status response."""
     job_id: str
     status: str
     created_at: str
@@ -132,14 +192,47 @@ class JobStatusResponse(BaseModel):
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
-# ---- Endpoints ----
-@app.get("/")
+
+# ==================== ROUTES ====================
+
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    """Serve the main HTML interface."""
+    logger.debug("Serving home page")
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get("/api")
 def root() -> Dict[str, str]:
-    return {"message": "RecruiterBrain v2 API. Try POST /v2/chat or /v2/insight."}
+    """API root endpoint."""
+    return {
+        "message": "RecruiterBrain v2 API",
+        "version": "2.0.0",
+        "endpoints": {
+            "chat": "POST /v2/chat",
+            "insight": "POST /v2/insight",
+            "upload": "POST /v2/upload_resume_celery",
+            "job_status": "GET /v2/jobs/celery/{task_id}"
+        }
+    }
 
 
 @app.post("/v2/chat", response_model=ChatResponse)
-def chat_v2_endpoint(chat_input: ChatRequest, _: None = Depends(rate_limiter)) -> Dict[str, Optional[str]]:
+async def chat_v2_endpoint(request: Request, chat_input: ChatRequest,response: Response) -> Dict[str, Optional[str]]:
+    """
+    Chat endpoint - conversational search.
+    
+    Rate limit: 20 requests per minute per IP.
+    """
+    # Check rate limit
+    await check_rate_limit(request, "chat")
+    # Get current limit status
+    limiter = get_rate_limiter()
+    client_ip = request.client.host
+    
+    # Add headers
+    response.headers["X-RateLimit-Limit"] = "20"
+    response.headers["X-RateLimit-Window"] = "60"
     question = chat_input.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Please enter a question.")
@@ -149,7 +242,7 @@ def chat_v2_endpoint(chat_input: ChatRequest, _: None = Depends(rate_limiter)) -
     career_stage = filters.get("career_stage")
     industry = filters.get("industry")
 
-    logger.info("V2 Chat request: len=%d", len(question))
+    logger.info(f"V2 Chat request: len={len(question)}, ip={get_client_ip(request)}")
 
     try:
         results = search_candidates_v2(
@@ -160,13 +253,22 @@ def chat_v2_endpoint(chat_input: ChatRequest, _: None = Depends(rate_limiter)) -
         )
         answer = format_for_chat(results, show_contacts=chat_input.show_contacts)
         return ChatResponse(answer=answer).model_dump()
-    except Exception as exc:  # pragma: no cover - depends on Milvus env
+    
+    except Exception as exc:
         logger.exception("V2 chat error")
         return ChatResponse(error=str(exc)).model_dump()
 
 
 @app.post("/v2/insight", response_model=InsightResponse)
-def insight_v2_endpoint(payload: InsightRequest, _: None = Depends(rate_limiter)) -> Dict[str, Any]:
+async def insight_v2_endpoint(request: Request, payload: InsightRequest) -> Dict[str, Any]:
+    """
+    Insight endpoint - detailed candidate ranking.
+    
+    Rate limit: 10 requests per minute per IP (more expensive operation).
+    """
+    # Check rate limit
+    await check_rate_limit(request, "insight")
+    
     question = payload.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Please enter a question.")
@@ -176,7 +278,7 @@ def insight_v2_endpoint(payload: InsightRequest, _: None = Depends(rate_limiter)
     career_stage = filters.get("career_stage")
     industry = filters.get("industry")
 
-    logger.info("V2 Insight request: len=%d", len(question))
+    logger.info(f"V2 Insight request: len={len(question)}, ip={get_client_ip(request)}")
 
     try:
         results = search_candidates_v2(
@@ -193,26 +295,24 @@ def insight_v2_endpoint(payload: InsightRequest, _: None = Depends(rate_limiter)
             scarcity_message=formatted.get("scarcity_message"),
             data_quality_banner=formatted.get("data_quality_banner"),
         ).model_dump()
-    except Exception as exc:  # pragma: no cover - depends on Milvus env
+    
+    except Exception as exc:
         logger.exception("V2 insight error")
         return InsightResponse(error=str(exc)).model_dump()
 
+
 @app.post("/v2/upload_resume", response_model=ResumeUploadResponse)
-async def upload_resume(
-    file: UploadFile = File(...),
-    _: None = Depends(rate_limiter),
-) -> Dict[str, Any]:
+async def upload_resume(request: Request, file: UploadFile = File(...)) -> Dict[str, Any]:
     """
-    Upload and ingest a resume (PDF/DOCX/ZIP).
+    Synchronous resume upload (blocking).
     
-    Pipeline:
-    1. Parse file → extract text
-    2. Scrub PII → remove sensitive data
-    3. LLM extraction → structured data
-    4. Merge PII back
-    5. Generate 3 embeddings
-    6. Insert into Milvus
+    Rate limit: 5 uploads per minute per IP.
+    
+    Note: For production, use /v2/upload_resume_celery instead.
     """
+    # Check rate limit
+    await check_rate_limit(request, "upload")
+    
     filename = file.filename or "unknown.pdf"
     
     logger.info("="*60)
@@ -220,65 +320,51 @@ async def upload_resume(
     logger.info("="*60)
     
     try:
-        # Step 0: Read file bytes
+        # Read file bytes
         logger.info("Step 0: Reading file bytes...")
         file_bytes = await file.read()
         file_size_mb = len(file_bytes) / (1024 * 1024)
         logger.info(f"✅ File read complete: {file_size_mb:.2f} MB")
         
-        # Step 1: Parse file
+        # Parse file
         logger.info(f"Step 1: Parsing file ({filename})...")
         resume_text = parse_file(filename, file_bytes)
         logger.info(f"✅ Text extracted: {len(resume_text)} characters")
         
         if len(resume_text) < 100:
-            logger.error(f"❌ Resume text too short: {len(resume_text)} chars")
             raise ValueError("Resume text too short. Please upload a valid resume.")
         
-        # Step 2: Scrub PII
-        logger.info("Step 2: Scrubbing PII from resume text...")
+        # Scrub PII
+        logger.info("Step 2: Scrubbing PII...")
         sanitized_text, pii = scrub_pii(resume_text)
-        logger.info(f"✅ PII scrubbed: {len(pii)} fields removed ({list(pii.keys())})")
-        logger.info(f"   Sanitized text length: {len(sanitized_text)} chars")
+        logger.info(f"✅ PII scrubbed: {len(pii)} fields")
         
-        # Step 3: Extract data with LLM
-        logger.info("Step 3: Sending sanitized text to LLM for extraction...")
-        logger.info(f"   Text preview: {sanitized_text[:200]}...")
+        # LLM extraction
+        logger.info("Step 3: LLM extraction...")
         extracted_data = extract_resume_data(sanitized_text)
-        logger.info(f"✅ LLM extraction complete")
-        logger.info(f"   Candidate name: {extracted_data.get('name', 'Unknown')}")
-        logger.info(f"   Career stage: {extracted_data.get('career_stage', 'Unknown')}")
-        logger.info(f"   Skills found: {len(extracted_data.get('skills_extracted', '').split(','))}")
+        logger.info(f"✅ Extracted: {extracted_data.get('name', 'Unknown')}")
         
-        # Step 4: Merge PII back
-        logger.info("Step 4: Merging PII back into extracted data...")
+        # Merge PII
+        logger.info("Step 4: Merging PII...")
         complete_data = merge_pii(extracted_data, pii)
-        logger.info(f"✅ PII merged back")
-        logger.info(f"   Email: {complete_data.get('email', 'None')}")
-        logger.info(f"   Phone: {complete_data.get('phone', 'None')}")
+        logger.info("✅ PII merged")
         
-        # Step 5: Generate embeddings
-        logger.info("Step 5: Generating 3 embeddings (summary, tech, role)...")
+        # Generate embeddings
+        logger.info("Step 5: Generating embeddings...")
         embeddings = generate_embeddings(complete_data)
-        logger.info(f"✅ Embeddings generated:")
-        logger.info(f"   summary_embedding: {len(embeddings['summary_embedding'])} dimensions")
-        logger.info(f"   tech_embedding: {len(embeddings['tech_embedding'])} dimensions")
-        logger.info(f"   role_embedding: {len(embeddings['role_embedding'])} dimensions")
+        logger.info("✅ Embeddings generated")
         
-        # Step 6: Insert into Milvus
-        logger.info("Step 6: Inserting candidate into Milvus...")
+        # Insert to Milvus
+        logger.info("Step 6: Inserting to Milvus...")
         candidate_id = insert_candidate(complete_data, embeddings, source_channel="Upload")
         logger.info(f"✅ Candidate inserted: {candidate_id}")
+        
+        # Invalidate search cache
+        invalidate_search_cache()
         
         logger.info("="*60)
         logger.info(f"✅ UPLOAD COMPLETE: {complete_data.get('name')} ({candidate_id})")
         logger.info("="*60)
-
-        # After successful insert:
-        candidate_id = insert_candidate(complete_data, embeddings, source_channel="Upload")
-        # Invalidate search cache
-        from .retrieval_engine import invalidate_search_cache
-        invalidate_search_cache()
         
         return ResumeUploadResponse(
             candidate_id=candidate_id,
@@ -289,58 +375,37 @@ async def upload_resume(
         
     except ValueError as e:
         logger.error(f"❌ Validation error: {e}")
-        return JSONResponse(
-            status_code=400,
-            content={"detail": str(e)}
-        )
+        raise HTTPException(status_code=400, detail=str(e))
     
     except Exception as e:
         logger.exception(f"❌ UPLOAD FAILED: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Upload failed: {str(e)}"}
-        )
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-@app.post("/v2/ingest_resume", response_model=ResumeUploadResponse)
-async def ingest_resume(
-    file: UploadFile = File(...),
-    _: None = Depends(rate_limiter),
-) -> Dict[str, Any]:
-    return await upload_resume(file, _)
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("recruiterbrainv2.__main__:app", host="0.0.0.0", port=8000, reload=True)
 
 @app.post("/v2/upload_resume_async", response_model=AsyncResumeUploadResponse)
 async def upload_resume_async(
+    request: Request,
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
-    _: None = Depends(rate_limiter),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ) -> Dict[str, Any]:
     """
-    Upload resume asynchronously (immediate response, background processing).
+    Asynchronous resume upload using FastAPI BackgroundTasks.
     
-    Returns job_id immediately. Use GET /v2/jobs/{job_id} to check status.
+    Rate limit: 5 uploads per minute per IP.
     
-    Flow:
-    1. Validate file
-    2. Create job
-    3. Return job_id immediately
-    4. Process in background
+    Returns immediately with job_id. Poll GET /v2/jobs/{job_id} for status.
     """
-    filename = file.filename or "unknown.pdf"
+    # Check rate limit
+    await check_rate_limit(request, "upload")
     
-    logger.info("="*60)
+    filename = file.filename or "unknown.pdf"
     logger.info(f"📤 ASYNC RESUME UPLOAD: {filename}")
-    logger.info("="*60)
     
     try:
-        # Read file bytes
+        # Read and validate file
         file_bytes = await file.read()
         file_size_mb = len(file_bytes) / (1024 * 1024)
         
-        # Validate file size (max 10MB)
         if file_size_mb > 10:
             raise ValueError(f"File too large: {file_size_mb:.2f} MB (max 10 MB)")
         
@@ -350,10 +415,7 @@ async def upload_resume_async(
         job_store = get_job_store()
         job_id = job_store.create_job(
             job_type="resume_upload",
-            params={
-                "filename": filename,
-                "file_size_mb": file_size_mb,
-            }
+            params={"filename": filename, "file_size_mb": file_size_mb}
         )
         
         # Schedule background task
@@ -370,7 +432,7 @@ async def upload_resume_async(
         return AsyncResumeUploadResponse(
             job_id=job_id,
             status="queued",
-            message=f"Resume upload queued for processing. Check status at /v2/jobs/{job_id}"
+            message=f"Resume queued. Check status at /v2/jobs/{job_id}"
         ).model_dump()
         
     except ValueError as e:
@@ -382,70 +444,27 @@ async def upload_resume_async(
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
-@app.get("/v2/jobs/{job_id}", response_model=JobStatusResponse)
-async def get_job_status(job_id: str) -> Dict[str, Any]:
-    """
-    Get job status and result.
-    
-    Status values:
-    - "queued": Job is waiting to be processed
-    - "processing": Job is currently being processed
-    - "completed": Job finished successfully (result available)
-    - "failed": Job failed (error message available)
-    """
-    job_store = get_job_store()
-    job_data = job_store.get_job(job_id)
-    
-    if not job_data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
-    return JobStatusResponse(**job_data).model_dump()
-
-
-@app.delete("/v2/jobs/{job_id}")
-async def cancel_job(job_id: str):
-    """
-    Cancel a job (if still queued).
-    
-    Note: Already-processing jobs cannot be cancelled.
-    """
-    job_store = get_job_store()
-    job_data = job_store.get_job(job_id)
-    
-    if not job_data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
-    if job_data["status"] == JobStatus.QUEUED:
-        job_store.update_job(job_id, JobStatus.FAILED, error="Cancelled by user")
-        return {"message": f"Job {job_id} cancelled"}
-    else:
-        return {"message": f"Job {job_id} is already {job_data['status']}, cannot cancel"}
-
 @app.post("/v2/upload_resume_celery", response_model=AsyncResumeUploadResponse)
 async def upload_resume_celery(
-    file: UploadFile = File(...),
-    _: None = Depends(rate_limiter),
+    request: Request,
+    file: UploadFile = File(...)
 ) -> Dict[str, Any]:
     """
-    Upload resume using Celery (production-grade async processing).
+    Production-grade async upload using Celery.
     
-    Advantages over BackgroundTasks:
+    Rate limit: 5 uploads per minute per IP.
+    
+    Advantages:
     - Distributed workers
     - Automatic retries
-    - Persistent queue (survives restarts)
+    - Persistent queue
     - Monitoring with Flower
+    """
+    # Check rate limit
+    await check_rate_limit(request, "upload")
     
-    Returns:
-        {
-            "job_id": "celery-task-id",
-            "status": "queued",
-            "message": "..."
-        }  """
     filename = file.filename or "unknown.pdf"
-    
-    logger.info("="*60)
     logger.info(f"📤 CELERY RESUME UPLOAD: {filename}")
-    logger.info("="*60)
     
     try:
         # Read and validate file
@@ -457,7 +476,7 @@ async def upload_resume_celery(
         
         logger.info(f"✅ File validated: {file_size_mb:.2f} MB")
         
-        # Encode file bytes to base64 (Celery can't serialize raw bytes)
+        # Encode to base64 (Celery serialization)
         file_bytes_b64 = base64.b64encode(file_bytes).decode('utf-8')
         
         # Submit to Celery
@@ -475,7 +494,7 @@ async def upload_resume_celery(
         return AsyncResumeUploadResponse(
             job_id=task.id,
             status="queued",
-            message=f"Resume queued for processing. Check status at /v2/jobs/celery/{task.id}"
+            message=f"Resume queued. Check status at /v2/jobs/celery/{task.id}"
         ).model_dump()
         
     except ValueError as e:
@@ -485,68 +504,22 @@ async def upload_resume_celery(
     except Exception as e:
         logger.exception(f"❌ Upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-        
-@app.get("/v2/jobs/celery/{task_id}")
-async def get_celery_job_status(task_id: str) -> Dict[str, Any]:
-    """
-    Get Celery task status.
-    
-    Status values:
-    - PENDING: Task waiting to be executed
-    - PROCESSING: Task is running
-    - SUCCESS: Task completed successfully
-    - FAILURE: Task failed
-    - RETRY: Task is being retried
-    """
-    from celery.result import AsyncResult
-    
-    task = AsyncResult(task_id, app=celery_app)
-    
-    response = {
-        "job_id": task_id,
-        "status": task.state,
-        "result": None,
-        "error": None,
-        "progress": None,
-    }
-    
-    if task.state == 'PENDING':
-        response["status"] = "queued"
-    
-    elif task.state == 'PROCESSING':
-        # Get progress info
-        if task.info:
-            response["progress"] = task.info.get("progress", 0)
-            response["status_message"] = task.info.get("status", "Processing...")
-    
-    elif task.state == 'SUCCESS':
-        response["status"] = "completed"
-        response["result"] = task.result
-    
-    elif task.state == 'FAILURE':
-        response["status"] = "failed"
-        response["error"] = str(task.info)
-    
-    elif task.state == 'RETRY':
-        response["status"] = "retrying"
-        response["error"] = str(task.info)
-    
-    return response
 
 
 @app.post("/v2/bulk_upload_resumes")
 async def bulk_upload_resumes(
-    files: list[UploadFile] = File(...),
-    _: None = Depends(rate_limiter),
+    request: Request,
+    files: list[UploadFile] = File(...)
 ) -> Dict[str, Any]:
     """
-    Upload multiple resumes at once.
+    Bulk upload multiple resumes (Celery parallel processing).
     
-    Processes them in parallel using Celery worker pool.
+    Rate limit: 1 bulk upload per hour per IP (very expensive).
     
-    Max 20 files per request.
+    Max 20 files per batch.
     """
-    import base64
+    # Check rate limit
+    await check_rate_limit(request, "bulk_upload")
     
     if len(files) > 20:
         raise HTTPException(status_code=400, detail="Maximum 20 files per batch")
@@ -554,7 +527,6 @@ async def bulk_upload_resumes(
     logger.info(f"📤 BULK UPLOAD: {len(files)} files")
     
     resume_data = []
-    
     for file in files:
         file_bytes = await file.read()
         file_bytes_b64 = base64.b64encode(file_bytes).decode('utf-8')
@@ -576,3 +548,123 @@ async def bulk_upload_resumes(
         "total_files": len(files),
         "message": f"Processing {len(files)} resumes in parallel"
     }
+
+
+@app.get("/v2/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(request: Request, job_id: str) -> Dict[str, Any]:
+    """
+    Get job status (FastAPI BackgroundTasks).
+    
+    Rate limit: 60 requests per minute per IP.
+    """
+    # Check rate limit
+    await check_rate_limit(request, "job_status")
+    
+    job_store = get_job_store()
+    job_data = job_store.get_job(job_id)
+    
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    return JobStatusResponse(**job_data).model_dump()
+
+
+@app.get("/v2/jobs/celery/{task_id}")
+async def get_celery_job_status(request: Request, task_id: str) -> Dict[str, Any]:
+    """
+    Get Celery task status.
+    
+    Rate limit: 60 requests per minute per IP.
+    """
+    # Check rate limit
+    await check_rate_limit(request, "job_status")
+    
+    from celery.result import AsyncResult
+    
+    task = AsyncResult(task_id, app=celery_app)
+    
+    response = {
+        "job_id": task_id,
+        "status": task.state,
+        "result": None,
+        "error": None,
+        "progress": None,
+    }
+    
+    if task.state == 'PENDING':
+        response["status"] = "queued"
+    
+    elif task.state == 'PROCESSING':
+        if task.info:
+            response["progress"] = task.info.get("progress", 0)
+            response["status_message"] = task.info.get("status", "Processing...")
+    
+    elif task.state == 'SUCCESS':
+        response["status"] = "completed"
+        response["result"] = task.result
+    
+    elif task.state == 'FAILURE':
+        response["status"] = "failed"
+        response["error"] = str(task.info)
+    
+    elif task.state == 'RETRY':
+        response["status"] = "retrying"
+        response["error"] = str(task.info)
+    
+    return response
+
+
+@app.delete("/v2/jobs/{job_id}")
+async def cancel_job(request: Request, job_id: str):
+    """Cancel a queued job."""
+    job_store = get_job_store()
+    job_data = job_store.get_job(job_id)
+    
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    if job_data["status"] == JobStatus.QUEUED:
+        job_store.update_job(job_id, JobStatus.FAILED, error="Cancelled by user")
+        return {"message": f"Job {job_id} cancelled"}
+    else:
+        return {"message": f"Job {job_id} is {job_data['status']}, cannot cancel"}
+
+@app.exception_handler(429)
+async def rate_limit_handler(request: Request, exc):
+    """Custom 429 response with helpful message."""
+    
+    retry_after = exc.headers.get("Retry-After", "60")
+    
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "Rate Limit Exceeded",
+            "message": "You've made too many requests. Please slow down.",
+            "retry_after_seconds": int(retry_after),
+            "retry_at": (datetime.utcnow() + timedelta(seconds=int(retry_after))).isoformat() + "Z",
+            "documentation": "https://your-docs.com/rate-limits"
+        },
+        headers={"Retry-After": retry_after}
+    )
+# ==================== HEALTH CHECK ====================
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint for monitoring."""
+    return {
+        "status": "healthy",
+        "version": "2.0.0",
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
+
+# ==================== MAIN ====================
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "recruiterbrainv2.__main__:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )

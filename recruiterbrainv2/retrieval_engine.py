@@ -20,6 +20,8 @@ from .config import (
 from .skill_extractor import extract_requirements
 from .ranker import hybrid_rank, compute_match_details
 from .cache import generate_cache_key, get_cache
+from .rate_limiter import global_limiter
+from .rate_limiter import RateLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -374,6 +376,10 @@ def _vector_search(
             - "tech_embedding": Skill-focused search (better for technical queries)
             - "role_embedding": Role/industry-focused search
     """
+    # Check global Milvus limit
+    if not global_limiter.check_milvus_limit():
+        logger.warning("Milvus global rate limit exceeded")
+        return []
     client = get_milvus_client()
     
     search_params = {

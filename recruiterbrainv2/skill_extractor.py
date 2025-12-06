@@ -5,6 +5,8 @@ import re
 from typing import Dict, List, Any, Optional
 from .config import get_openai_client, OPENAI_MODEL, ENABLE_CACHE, LLM_CACHE_TTL
 from .cache import cached
+from .rate_limiter import global_limiter
+from .rate_limiter import RateLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +211,10 @@ def _extract_skills_llm(query_text: str) -> Dict[str, Any]:
     
     Aligned with candidates_v3 schema for perfect matching.
     """
+    # Check global rate limit BEFORE calling OpenAI
+    if not global_limiter.check_openai_limit():
+        logger.warning("OpenAI global rate limit exceeded, using fallback")
+        return _fallback_extraction(query_text)
     client = get_openai_client()
     
     if not client:
