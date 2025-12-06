@@ -121,7 +121,53 @@ async def check_rate_limit(request: Request, endpoint: str):
             headers={"Retry-After": str(retry_after)}
         )
 
+@app.get("/v2/pool/stats")
+async def get_pool_stats():
+    """
+    Get Milvus connection pool statistics.
+    
+    Useful for monitoring and debugging.
+    """
+    from .config import get_milvus_pool, ENABLE_CONNECTION_POOL
+    
+    if not ENABLE_CONNECTION_POOL:
+        return {
+            "pooling_enabled": False,
+            "message": "Connection pooling is disabled"
+        }
+    
+    pool = get_milvus_pool()
+    stats = pool.get_stats()
+    
+    return {
+        "pooling_enabled": True,
+        "stats": stats,
+        "health": {
+            "total_connections": stats["active_connections"],
+            "available": stats["available"],
+            "in_use": stats["in_use"],
+            "utilization_percent": round((stats["in_use"] / stats["pool_size"]) * 100, 1)
+        }
+    }
 
+
+@app.post("/v2/pool/health_check")
+async def pool_health_check():
+    """Run health check on all pool connections."""
+    from .config import get_milvus_pool, ENABLE_CONNECTION_POOL
+    
+    if not ENABLE_CONNECTION_POOL:
+        return {"error": "Connection pooling is disabled"}
+    
+    pool = get_milvus_pool()
+    healthy_count = pool.health_check_all()
+    stats = pool.get_stats()
+    
+    return {
+        "healthy_connections": healthy_count,
+        "total_connections": stats["active_connections"],
+        "health_percentage": round((healthy_count / stats["active_connections"]) * 100, 1)
+    }
 # ==================== CUSTOM ERROR HANDLERS ====================
 
 @app.exception_handler(429)

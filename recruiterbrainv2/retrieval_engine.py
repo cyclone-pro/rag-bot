@@ -356,7 +356,7 @@ def _keyword_search(
         return []
     
     # Each thread gets its own Milvus client (thread-safe)
-    client = get_milvus_client()
+    client_or_pool = get_milvus_client()
     
     # Build OR condition for skills
     skill_conditions = []
@@ -375,20 +375,28 @@ def _keyword_search(
         keyword_expr = f"({filter_expr}) and ({keyword_expr})"
     
     try:
-        logger.debug(f"Keyword filter: {keyword_expr[:200]}...")
+        # Use connection pool if available
+        if hasattr(client_or_pool, 'connection'):
+            # Connection pool
+            with client_or_pool.connection() as client:
+                results = client.query(
+                    collection_name=COLLECTION,
+                    filter=keyword_expr,
+                    output_fields=SEARCH_OUTPUT_FIELDS,
+                    limit=limit,
+                )
+        else:
+            # Single client
+            results = client_or_pool.query(
+                collection_name=COLLECTION,
+                filter=keyword_expr,
+                output_fields=SEARCH_OUTPUT_FIELDS,
+                limit=limit,
+            )
         
-        results = client.query(
-            collection_name=COLLECTION,
-            filter=keyword_expr,
-            output_fields=SEARCH_OUTPUT_FIELDS,
-            limit=limit,
-        )
-        
-        # Add high vector score for exact matches
+        # Add vector score
         for r in results:
             r['vector_score'] = 0.95
-        
-        logger.debug(f"Keyword search returned {len(results)} results")
         
         return results
         
@@ -410,7 +418,8 @@ def _vector_search(
     Thread-safe for parallel execution.
     """
     # Each thread gets its own Milvus client (thread-safe)
-    client = get_milvus_client()
+    client_or_pool = get_milvus_client()
+
     
     search_params = {
         "collection_name": COLLECTION,
@@ -428,12 +437,16 @@ def _vector_search(
         search_params["filter"] = filter_expr
     
     try:
-        logger.debug(f"Vector search using {use_field}, limit={limit}")
-        
-        results = client.search(**search_params)
+        # Use connection pool if available
+        if hasattr(client_or_pool, 'connection'):
+            # Connection pool
+            with client_or_pool.connection() as client:
+                results = client.search(**search_params)
+        else:
+            # Single client
+            results = client_or_pool.search(**search_params)
         
         if not results or not results[0]:
-            logger.debug("Vector search returned no results")
             return []
         
         candidates = []
@@ -450,8 +463,6 @@ def _vector_search(
             
             entity["vector_score"] = float(distance)
             candidates.append(entity)
-        
-        logger.debug(f"Vector search returned {len(candidates)} candidates")
         
         return candidates
         
