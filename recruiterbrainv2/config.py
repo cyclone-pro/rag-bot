@@ -40,6 +40,14 @@ ENABLE_CACHE = os.getenv("ENABLE_CACHE", "true").lower() == "true"
 LLM_CACHE_TTL = int(os.getenv("LLM_CACHE_TTL", "3600"))      # 1 hour
 SEARCH_CACHE_TTL = int(os.getenv("SEARCH_CACHE_TTL", "300"))  # 5 minutes
 # ========================
+# Connection Pool Config
+# ========================
+ENABLE_CONNECTION_POOL = os.getenv("ENABLE_CONNECTION_POOL", "true").lower() == "true"
+MILVUS_POOL_SIZE = int(os.getenv("MILVUS_POOL_SIZE", "10"))
+MILVUS_POOL_MAX_AGE = int(os.getenv("MILVUS_POOL_MAX_AGE", "3600"))  # 1 hour
+MILVUS_POOL_MAX_USES = int(os.getenv("MILVUS_POOL_MAX_USES", "1000"))
+MILVUS_POOL_HEALTH_CHECK_INTERVAL = int(os.getenv("MILVUS_POOL_HEALTH_CHECK_INTERVAL", "60"))  # 1 minute
+# ========================
 # Search Parameters
 # ========================
 VECTOR_TOP_K = 100        # ANN candidates
@@ -145,32 +153,81 @@ def get_search_thread_pool() -> ThreadPoolExecutor:
     )
     logger.info(f"✅ Search thread pool initialized with {SEARCH_THREAD_POOL_SIZE} workers")
     return pool
+
+# Milvus pool
+@lru_cache(maxsize=1)
+def get_milvus_pool():
+    """
+    Get Milvus connection pool (singleton).
+    
+    Returns pool for high-concurrency scenarios.
+    """
+    global _milvus_pool
+    
+    if _milvus_pool is None:
+        from .milvus_pool import MilvusConnectionPool
+        
+        if not MILVUS_URI:
+            raise RuntimeError("MILVUS_URI not configured")
+        
+        # Determine if Zilliz Cloud
+        is_zilliz = MILVUS_TOKEN or "zillizcloud.com" in MILVUS_URI
+        
+        if is_zilliz:
+            # Zilliz Cloud
+            uri = MILVUS_URI.replace("http://", "").replace("https://", "")
+            if not uri.startswith("https://"):
+                uri = f"https://{uri}"
+            
+            _milvus_pool = MilvusConnectionPool(
+                uri=uri,
+                token=MILVUS_TOKEN,
+                secure=True,
+                pool_size=MILVUS_POOL_SIZE,
+                max_age_seconds=MILVUS_POOL_MAX_AGE,
+                max_uses=MILVUS_POOL_MAX_USES
+            )
+        else:
+            # Local Milvus
+            _milvus_pool = MilvusConnectionPool(
+                uri=MILVUS_URI,
+                pool_size=MILVUS_POOL_SIZE,
+                max_age_seconds=MILVUS_POOL_MAX_AGE,
+                max_uses=MILVUS_POOL_MAX_USES
+            )
+    
+    return _milvus_pool
 # ========================
 # Lazy Clients
 # ========================
 @lru_cache(maxsize=1)
 def get_milvus_client():
-    """Get Milvus client (singleton)."""
-    if not MILVUS_URI:
-        raise RuntimeError("MILVUS_URI not configured")
+    """
+    Get Milvus client.
     
-    from pymilvus import MilvusClient
-    
-    logger.info(f"Initializing Milvus client for {COLLECTION}")
-    
-    # Handle different Milvus types
-    if MILVUS_TOKEN or "zillizcloud.com" in MILVUS_URI:
-        # Milvus Cloud (Zilliz)
-        uri = MILVUS_URI.replace("http://", "").replace("https://", "")
-        if not uri.startswith("https://"):
-            uri = f"https://{uri}"
-        
-        logger.info(f"Using Zilliz Cloud: {uri}")
-        return MilvusClient(uri=uri, token=MILVUS_TOKEN, secure=True)
+    If connection pooling enabled: Returns pool context manager
+    If disabled: Returns single client (legacy)
+    """
+    if ENABLE_CONNECTION_POOL:
+        # Return pool for context manager usage
+        return get_milvus_pool()
     else:
-        # Local Milvus
-        logger.info(f"Using local Milvus: {MILVUS_URI}")
-        return MilvusClient(uri=MILVUS_URI)
+        # Legacy: single connection
+        from pymilvus import MilvusClient
+        
+        if not MILVUS_URI:
+            raise RuntimeError("MILVUS_URI not configured")
+        
+        logger.info(f"Initializing single Milvus client for {COLLECTION}")
+        
+        if MILVUS_TOKEN or "zillizcloud.com" in MILVUS_URI:
+            uri = MILVUS_URI.replace("http://", "").replace("https://", "")
+            if not uri.startswith("https://"):
+                uri = f"https://{uri}"
+            
+            return MilvusClient(uri=uri, token=MILVUS_TOKEN, secure=True)
+        else:
+            return MilvusClient(uri=MILVUS_URI)
 
 
 @lru_cache(maxsize=1)
@@ -193,3 +250,14 @@ def get_openai_client() -> Optional[object]:
     except ImportError:
         logger.warning("openai package not installed")
         return None
+
+
+@lru_cache(maxsize=1)
+def get_search_thread_pool() -> ThreadPoolExecutor:
+    """Get thread pool for parallel search operations."""
+    pool = ThreadPoolExecutor(
+        max_workers=SEARCH_THREAD_POOL_SIZE,
+        thread_name_prefix="search_worker"
+    )
+    logger.info(f"✅ Search thread pool initialized with {SEARCH_THREAD_POOL_SIZE} workers")
+    return pool
