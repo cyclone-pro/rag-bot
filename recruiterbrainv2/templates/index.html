@@ -909,11 +909,12 @@
       
         uploadResumeBtn.disabled = true;
         uploadResumeBtn.textContent = "Uploading...";
-        uploadStatus.textContent = "⏳ Processing resume...";
+        uploadStatus.textContent = "⏳ Uploading...";
         uploadStatus.style.color = "var(--text-muted)";
       
         try {
-          const response = await fetch("/v2/upload_resume", {
+          // Submit async upload
+          const response = await fetch("/v2/upload_resume_async", {
             method: "POST",
             body: formData,
           });
@@ -924,27 +925,87 @@
           }
       
           const data = await response.json();
+          const jobId = data.job_id;
           
-          uploadStatus.textContent = `✅ ${data.message} (ID: ${data.candidate_id})`;
-          uploadStatus.style.color = "var(--success)";
+          uploadStatus.textContent = `⏳ Processing resume (Job: ${jobId.substring(0, 8)}...)`;
           
           resumeFileInput.value = "";
           
-          // Add success message to chat
-          addMessage(
-            `Resume uploaded successfully!\nCandidate: ${data.name}\nID: ${data.candidate_id}`,
-            "bot"
-          );
+          // Poll for job status
+          pollJobStatus(jobId);
           
         } catch (err) {
           console.error(err);
           uploadStatus.textContent = `❌ ${err.message}`;
           uploadStatus.style.color = "var(--error)";
-        } finally {
           uploadResumeBtn.disabled = false;
           uploadResumeBtn.textContent = "Upload";
         }
       });
+
+      // ==================== POLL JOB STATUS ====================
+      // Poll job status
+async function pollJobStatus(jobId) {
+  const maxAttempts = 60; // 60 seconds max (1 poll/second)
+  let attempts = 0;
+  
+  const pollInterval = setInterval(async () => {
+    attempts++;
+    
+    try {
+      const response = await fetch(`/v2/jobs/${jobId}`);
+      
+      if (!response.ok) {
+        throw new Error("Failed to fetch job status");
+      }
+      
+      const job = await response.json();
+      
+      if (job.status === "completed") {
+        clearInterval(pollInterval);
+        
+        uploadStatus.textContent = `✅ Resume processed! Candidate: ${job.result.name} (ID: ${job.result.candidate_id})`;
+        uploadStatus.style.color = "var(--success)";
+        
+        uploadResumeBtn.disabled = false;
+        uploadResumeBtn.textContent = "Upload";
+        
+        // Add success message to chat
+        addMessage(
+          `Resume uploaded successfully!\nCandidate: ${job.result.name}\nID: ${job.result.candidate_id}\nSkills: ${job.result.skills_count} detected`,
+          "bot"
+        );
+        
+      } else if (job.status === "failed") {
+        clearInterval(pollInterval);
+        
+        uploadStatus.textContent = `❌ Processing failed: ${job.error}`;
+        uploadStatus.style.color = "var(--error)";
+        
+        uploadResumeBtn.disabled = false;
+        uploadResumeBtn.textContent = "Upload";
+        
+      } else if (job.status === "processing") {
+        uploadStatus.textContent = `⏳ Processing resume... (${attempts}s)`;
+        
+      } else {
+        uploadStatus.textContent = `⏳ Queued for processing... (${attempts}s)`;
+      }
+      
+      // Timeout after max attempts
+      if (attempts >= maxAttempts) {
+        clearInterval(pollInterval);
+        uploadStatus.textContent = `⚠️ Processing taking longer than expected. Check back later.`;
+        uploadStatus.style.color = "var(--warning)";
+        uploadResumeBtn.disabled = false;
+        uploadResumeBtn.textContent = "Upload";
+      }
+      
+    } catch (err) {
+      console.error("Poll error:", err);
+    }
+  }, 1000); // Poll every 1 second
+}
     </script>
   </body>
 </html>

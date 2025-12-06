@@ -12,6 +12,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from fastapi import UploadFile, File
+from fastapi import BackgroundTasks
+from .jobs import get_job_store, JobStatus
+from .workers import process_resume_upload
 
 from .formatter import format_for_chat, format_for_insight
 from .retrieval_engine import search_candidates_v2
@@ -109,6 +112,24 @@ class ResumeUploadResponse(BaseModel):
     name: str
     status: str
     message: str
+# ====================  ASYNC UPLOAD ENDPOINTS ====================
+
+class AsyncResumeUploadResponse(BaseModel):
+    """Response for async resume upload."""
+    job_id: str
+    status: str
+    message: str
+
+
+class JobStatusResponse(BaseModel):
+    """Job status response."""
+    job_id: str
+    status: str
+    created_at: str
+    updated_at: str
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
 # ---- Endpoints ----
 @app.get("/")
 def root() -> Dict[str, str]:
@@ -288,4 +309,113 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("recruiterbrainv2.__main__:app", host="0.0.0.0", port=8000, reload=True)
+
+@app.post("/v2/upload_resume_async", response_model=AsyncResumeUploadResponse)
+async def upload_resume_async(
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    _: None = Depends(rate_limiter),
+) -> Dict[str, Any]:
+    """
+    Upload resume asynchronously (immediate response, background processing).
+    
+    Returns job_id immediately. Use GET /v2/jobs/{job_id} to check status.
+    
+    Flow:
+    1. Validate file
+    2. Create job
+    3. Return job_id immediately
+    4. Process in background
+    """
+    filename = file.filename or "unknown.pdf"
+    
+    logger.info("="*60)
+    logger.info(f"📤 ASYNC RESUME UPLOAD: {filename}")
+    logger.info("="*60)
+    
+    try:
+        # Read file bytes
+        file_bytes = await file.read()
+        file_size_mb = len(file_bytes) / (1024 * 1024)
+        
+        # Validate file size (max 10MB)
+        if file_size_mb > 10:
+            raise ValueError(f"File too large: {file_size_mb:.2f} MB (max 10 MB)")
+        
+        logger.info(f"✅ File validated: {file_size_mb:.2f} MB")
+        
+        # Create job
+        job_store = get_job_store()
+        job_id = job_store.create_job(
+            job_type="resume_upload",
+            params={
+                "filename": filename,
+                "file_size_mb": file_size_mb,
+            }
+        )
+        
+        # Schedule background task
+        background_tasks.add_task(
+            process_resume_upload,
+            job_id=job_id,
+            filename=filename,
+            file_bytes=file_bytes,
+            source_channel="Upload"
+        )
+        
+        logger.info(f"✅ Job {job_id} created and queued")
+        
+        return AsyncResumeUploadResponse(
+            job_id=job_id,
+            status="queued",
+            message=f"Resume upload queued for processing. Check status at /v2/jobs/{job_id}"
+        ).model_dump()
+        
+    except ValueError as e:
+        logger.error(f"❌ Validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    except Exception as e:
+        logger.exception(f"❌ Upload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.get("/v2/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(job_id: str) -> Dict[str, Any]:
+    """
+    Get job status and result.
+    
+    Status values:
+    - "queued": Job is waiting to be processed
+    - "processing": Job is currently being processed
+    - "completed": Job finished successfully (result available)
+    - "failed": Job failed (error message available)
+    """
+    job_store = get_job_store()
+    job_data = job_store.get_job(job_id)
+    
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    return JobStatusResponse(**job_data).model_dump()
+
+
+@app.delete("/v2/jobs/{job_id}")
+async def cancel_job(job_id: str):
+    """
+    Cancel a job (if still queued).
+    
+    Note: Already-processing jobs cannot be cancelled.
+    """
+    job_store = get_job_store()
+    job_data = job_store.get_job(job_id)
+    
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    if job_data["status"] == JobStatus.QUEUED:
+        job_store.update_job(job_id, JobStatus.FAILED, error="Cancelled by user")
+        return {"message": f"Job {job_id} cancelled"}
+    else:
+        return {"message": f"Job {job_id} is already {job_data['status']}, cannot cancel"}
 
