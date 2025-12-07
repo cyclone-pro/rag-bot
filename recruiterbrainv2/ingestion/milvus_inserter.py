@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Dict
 from ..config import get_milvus_client, COLLECTION
+ENABLE_CONNECTION_POOL=False
 
 logger = logging.getLogger(__name__)
 

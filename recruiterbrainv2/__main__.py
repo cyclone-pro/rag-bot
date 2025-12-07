@@ -2,6 +2,8 @@
 from __future__ import annotations
 import os
 import sys
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse  
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
 import logging
@@ -15,7 +17,8 @@ from pydantic import BaseModel, Field
 from fastapi import UploadFile, File
 from fastapi import BackgroundTasks
 from fastapi import Response
-
+import zipfile
+import io
 from .jobs import get_job_store, JobStatus
 from .workers import process_resume_upload
 from .celery_app import celery_app
@@ -58,7 +61,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+# ==================== STATIC FILES ====================
+BASE_DIR = os.path.dirname(__file__)
+static_dir = os.path.join(BASE_DIR, "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    logger.info(f"✅ Static files mounted from: {static_dir}")
+else:
+    logger.warning(f"⚠️  Static directory not found at: {static_dir}")
 # ==================== TEMPLATES ====================
 BASE_DIR = os.path.dirname(__file__)
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -75,7 +85,21 @@ RATE_LIMITS = {
     "job_status": (60, 60),     # 60/minute
 }
 
+@app.get("/styles.css")
+async def serve_styles():
+    """Serve CSS file at root level."""
+    css_path = os.path.join(BASE_DIR, "static", "styles.css")
+    if os.path.exists(css_path):
+        return FileResponse(css_path, media_type="text/css")
+    raise HTTPException(status_code=404, detail="CSS file not found")
 
+@app.get("/script.js")
+async def serve_script():
+    """Serve JS file at root level."""
+    js_path = os.path.join(BASE_DIR, "static", "script.js")
+    if os.path.exists(js_path):
+        return FileResponse(js_path, media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="JS file not found")
 def get_client_ip(request: Request) -> str:
     """Extract client IP from request."""
     # Check X-Forwarded-For header (for proxies)
@@ -556,17 +580,11 @@ async def upload_resume_celery(
 @app.post("/v2/bulk_upload_resumes")
 async def bulk_upload_resumes(
     request: Request,
-    files: list[UploadFile] = File(...)
+    files: list[UploadFile] = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ) -> Dict[str, Any]:
-    """
-    Bulk upload multiple resumes (Celery parallel processing).
-    
-    Rate limit: 1 bulk upload per hour per IP (very expensive).
-    
-    Max 20 files per batch.
-    """
-    # Check rate limit
-    await check_rate_limit(request, "bulk_upload")
+    """Bulk upload multiple resumes (with optional Celery)."""
+    # await check_rate_limit(request, "bulk_upload")
     
     if len(files) > 20:
         raise HTTPException(status_code=400, detail="Maximum 20 files per batch")
@@ -574,28 +592,96 @@ async def bulk_upload_resumes(
     logger.info(f"📤 BULK UPLOAD: {len(files)} files")
     
     resume_data = []
+    
     for file in files:
         file_bytes = await file.read()
-        file_bytes_b64 = base64.b64encode(file_bytes).decode('utf-8')
+        filename = file.filename or "unknown.pdf"
         
-        resume_data.append({
-            "filename": file.filename or "unknown.pdf",
-            "file_bytes_b64": file_bytes_b64,
-        })
+        # Check if ZIP file
+        if filename.endswith('.zip'):
+            logger.info(f"📦 Extracting ZIP file: {filename}")
+            
+            import zipfile
+            import io
+            
+            try:
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zip_file:
+                    for member in zip_file.namelist():
+                        if member.endswith('/') or member.startswith('__MACOSX'):
+                            continue
+                        
+                        if member.endswith(('.docx', '.pdf', '.doc', '.txt')):
+                            member_bytes = zip_file.read(member)
+                            member_bytes_b64 = base64.b64encode(member_bytes).decode('utf-8')
+                            
+                            resume_data.append({
+                                "filename": member,
+                                "file_bytes_b64": member_bytes_b64,
+                            })
+                            
+                logger.info(f"✅ Extracted {len(resume_data)} resumes from ZIP")
+            
+            except Exception as e:
+                logger.error(f"❌ Failed to extract ZIP: {e}")
+                raise HTTPException(status_code=400, detail=f"Invalid ZIP file: {e}")
+        
+        else:
+            file_bytes_b64 = base64.b64encode(file_bytes).decode('utf-8')
+            resume_data.append({
+                "filename": filename,
+                "file_bytes_b64": file_bytes_b64,
+            })
     
-    # Submit bulk task
-    task = bulk_process_resumes.apply_async(
-        kwargs={"resume_files": resume_data},
-        queue="bulk_processing"
-    )
+    if not resume_data:
+        raise HTTPException(status_code=400, detail="No valid resume files found")
     
-    return {
-        "job_id": task.id,
-        "status": "processing",
-        "total_files": len(files),
-        "message": f"Processing {len(files)} resumes in parallel"
-    }
-
+    logger.info(f"📋 Total resumes to process: {len(resume_data)}")
+    
+    # ====== USE CELERY OR BACKGROUNDTASKS ======
+    from .config import USE_CELERY
+    
+    if USE_CELERY:
+        # Use Celery (parallel processing)
+        logger.info("Using Celery for parallel processing")
+        
+        task = bulk_process_resumes.apply_async(
+            args=[resume_data],
+            queue="bulk_processing"
+        )
+        
+        return {
+            "job_id": task.id,
+            "status": "processing",
+            "total_files": len(resume_data),
+            "message": f"Processing {len(resume_data)} resumes in parallel (Celery)"
+        }
+    
+    else:
+        # Use BackgroundTasks (sequential processing)
+        logger.info("Using BackgroundTasks for sequential processing")
+        
+        job_store = get_job_store()
+        job_id = job_store.create_job(
+            job_type="bulk_upload",
+            params={"total_files": len(resume_data)}
+        )
+        
+        # Process each resume sequentially in background
+        for idx, resume in enumerate(resume_data):
+            background_tasks.add_task(
+                process_resume_upload,
+                job_id=f"{job_id}_file_{idx}",
+                filename=resume["filename"],
+                file_bytes=base64.b64decode(resume["file_bytes_b64"]),
+                source_channel=f"BulkUpload_{idx+1}/{len(resume_data)}"
+            )
+        
+        return {
+            "job_id": job_id,
+            "status": "processing",
+            "total_files": len(resume_data),
+            "message": f"Processing {len(resume_data)} resumes sequentially (BackgroundTasks)"
+        }
 
 @app.get("/v2/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(request: Request, job_id: str) -> Dict[str, Any]:

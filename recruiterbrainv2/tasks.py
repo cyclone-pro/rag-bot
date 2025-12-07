@@ -1,6 +1,6 @@
 """Celery tasks for background processing."""
 import logging
-from typing import Dict, Any
+from typing import Dict, Any , List
 from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
 
@@ -163,59 +163,71 @@ def process_resume_task(
     name="recruiterbrainv2.tasks.bulk_process_resumes",
     max_retries=1,
 )
-def bulk_process_resumes(
-    self,
-    resume_files: list[Dict[str, str]]  # List of {filename, file_bytes_b64}
-) -> Dict[str, Any]:
+def bulk_process_resumes(self, resume_files: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Process multiple resumes in parallel.
+    Process multiple resumes in parallel using Celery tasks.
     
-    Args:
-        resume_files: List of resume data
-    
-    Returns:
-        {
-            "total": 10,
-            "successful": 8,
-            "failed": 2,
-            "task_ids": [...]
-        }
+    Uses chord pattern to avoid blocking on subtask results.
     """
-    from celery import group
+    from celery import chord
     
     task_id = self.request.id
-    logger.info(f"[Bulk Task {task_id}] Processing {len(resume_files)} resumes")
+    total_files = len(resume_files)
     
-    # Create parallel tasks
-    job = group(
-        process_resume_task.s(
-            filename=resume["filename"],
-            file_bytes_b64=resume["file_bytes_b64"],
-            source_channel="Bulk Upload"
+    logger.info(f"[Bulk Task {task_id}] Processing {total_files} resumes")
+    
+    # Create subtasks
+    subtasks = []
+    for idx, resume_data in enumerate(resume_files):
+        task = process_resume_task.s(
+            filename=resume_data["filename"],
+            file_bytes_b64=resume_data["file_bytes_b64"],
+            source_channel=f"BulkUpload_{idx+1}/{total_files}"
         )
-        for resume in resume_files
+        subtasks.append(task)
+    
+    # Use chord: run all subtasks, then call callback with results
+    # This doesn't block!
+    callback = finalize_bulk_upload.s(
+        bulk_task_id=task_id,
+        total=total_files
     )
     
-    # Execute in parallel
-    result = job.apply_async()
+    chord(subtasks)(callback)
     
-    # Wait for all to complete (with timeout)
-    try:
-        results = result.get(timeout=600)  # 10 minute timeout
-        
-        successful = sum(1 for r in results if r is not None)
-        failed = len(results) - successful
-        
-        return {
-            "total": len(resume_files),
-            "successful": successful,
-            "failed": failed,
-            "results": results
-        }
-        
-    except Exception as e:
-        logger.error(f"[Bulk Task {task_id}] Failed: {e}")
-        raise
+    logger.info(f"[Bulk Task {task_id}] Submitted {total_files} subtasks")
+    
+    return {
+        "status": "processing",
+        "total": total_files,
+        "message": f"Processing {total_files} resumes in parallel"
+    }
+
+
+@celery_app.task(name="recruiterbrainv2.tasks.finalize_bulk_upload")
+def finalize_bulk_upload(results: List[Dict], bulk_task_id: str, total: int) -> Dict[str, Any]:
+    """
+    Callback function that runs after all bulk upload subtasks complete.
+    """
+    logger.info(f"[Bulk Task {bulk_task_id}] Finalizing bulk upload")
+    
+    successful = sum(1 for r in results if r and r.get("status") == "success")
+    failed = total - successful
+    
+    errors = [r.get("error") for r in results if r and r.get("error")]
+    
+    logger.info(
+        f"[Bulk Task {bulk_task_id}] ✅ Complete: "
+        f"{successful}/{total} successful, {failed} failed"
+    )
+    
+    return {
+        "successful": successful,
+        "failed": failed,
+        "total": total,
+        "errors": errors[:10]
+    }
+
 
 
 @celery_app.task(name="recruiterbrainv2.tasks.cleanup_old_jobs")

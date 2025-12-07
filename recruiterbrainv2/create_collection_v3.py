@@ -14,7 +14,8 @@ from pymilvus import (
 import os
 
 # ==================== CONFIGURATION ====================
-MILVUS_URI = os.getenv("MILVUS_URI", "http://34.135.232.156:19530")
+MILVUS_HOST = os.getenv("MILVUS_HOST", "34.55.41.188")
+MILVUS_PORT = int(os.getenv("MILVUS_PORT", "19530"))
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "")
 COLLECTION_NAME = "candidates_v3"
 
@@ -28,17 +29,17 @@ def connect_milvus():
         # Milvus Cloud
         connections.connect(
             alias="default",
-            uri=MILVUS_URI,
+            uri=f"{MILVUS_HOST}:{MILVUS_PORT}",
             token=MILVUS_TOKEN
         )
     else:
-        # Local Milvus
+        # Local Milvus (your setup)
         connections.connect(
             alias="default",
-            host=MILVUS_URI.replace("http://", "").split(":")[0],
-            port=MILVUS_URI.split(":")[-1]
+            host=MILVUS_HOST,
+            port=MILVUS_PORT
         )
-    print(f"✅ Connected to Milvus at {MILVUS_URI}")
+    print(f"✅ Connected to Milvus at {MILVUS_HOST}:{MILVUS_PORT}")
 
 
 # ==================== DEFINE SCHEMA ====================

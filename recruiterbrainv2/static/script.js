@@ -301,37 +301,29 @@ uploadResumeBtn.addEventListener("click", async () => {
     return;
   }
 
-  const formData = new FormData();
-  formData.append("file", file);
-
   uploadResumeBtn.disabled = true;
   uploadResumeBtn.textContent = "Uploading...";
   uploadStatus.textContent = "⏳ Uploading...";
   uploadStatus.style.color = "var(--text-muted)";
+  console.log('=== UPLOAD STARTED ===');
+  console.log('File name:', file.name);
+  console.log('Is ZIP?', file.name.endsWith('.zip'));
 
   try {
-    // async endpoint that returns { job_id }
-    const response = await fetch("/v2/upload_resume_async", {
-      method: "POST",
-      body: formData,
-    });
+    // ====== CHECK IF ZIP FILE ======
+    if (file.name.endsWith('.zip')) {
+      // Use bulk upload endpoint
+      console.log('→ Using BULK endpoint: /v2/bulk_upload_resumes');
+      await uploadBulkResumes(file);
+    } else {
+      // Use single upload endpoint
+      console.log('→ Using SINGLE endpoint: /v2/upload_resume_async');
 
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || "Upload failed");
+      await uploadSingleResume(file);
     }
-
-    const data = await response.json();
-    const jobId = data.job_id;
-
-    uploadStatus.textContent = `⏳ Processing resume (Job: ${jobId.substring(
-      0,
-      8
-    )}...)`;
-
+    
     resumeFileInput.value = "";
-
-    pollJobStatus(jobId);
+    
   } catch (err) {
     console.error(err);
     uploadStatus.textContent = `❌ ${err.message}`;
@@ -341,7 +333,60 @@ uploadResumeBtn.addEventListener("click", async () => {
   }
 });
 
-// Poll job status from /v2/jobs/{job_id}
+// ====== BULK UPLOAD (for ZIP files) ======
+async function uploadBulkResumes(zipFile) {
+  const formData = new FormData();
+  formData.append('files', zipFile); // Note: 'files' plural
+  
+  const response = await fetch('/v2/bulk_upload_resumes', {
+    method: 'POST',
+    body: formData
+  });
+  
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Bulk upload failed");
+  }
+  
+  const data = await response.json();
+  const jobId = data.job_id;
+  
+  uploadStatus.textContent = `✅ Processing ${data.total_files} resumes (Job: ${jobId.substring(0, 8)}...)`;
+  uploadStatus.style.color = "var(--success)";
+  
+  console.log(`Bulk upload started: ${data.total_files} resumes`);
+  
+  // Poll Celery job status for bulk upload
+  pollCeleryJobStatus(jobId, true);  // true = bulk mode
+}
+
+// ====== SINGLE UPLOAD (for individual files) ======
+async function uploadSingleResume(file) {
+  const formData = new FormData();
+  formData.append('file', file); // Note: 'file' singular
+  
+  const response = await fetch('/v2/upload_resume_async', {
+    method: 'POST',
+    body: formData
+  });
+  
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Upload failed");
+  }
+  
+  const data = await response.json();
+  const jobId = data.job_id;
+  
+  uploadStatus.textContent = `⏳ Processing resume (Job: ${jobId.substring(0, 8)}...)`;
+  
+  console.log('Single upload started');
+  
+  // Poll job status (BackgroundTasks)
+  pollJobStatus(jobId);
+}
+
+// ====== POLL JOB STATUS (for single uploads using BackgroundTasks) ======
 async function pollJobStatus(jobId) {
   const maxAttempts = 60;
   let attempts = 0;
@@ -387,8 +432,7 @@ async function pollJobStatus(jobId) {
 
       if (attempts >= maxAttempts) {
         clearInterval(pollInterval);
-        uploadStatus.textContent =
-          "⚠️ Processing taking longer than expected. Check back later.";
+        uploadStatus.textContent = "⚠️ Processing taking longer than expected. Check back later.";
         uploadStatus.style.color = "var(--warning)";
         uploadResumeBtn.disabled = false;
         uploadResumeBtn.textContent = "Upload";
@@ -397,6 +441,73 @@ async function pollJobStatus(jobId) {
       console.error("Poll error:", err);
     }
   }, 1000);
+}
+
+// ====== POLL CELERY JOB STATUS (for bulk uploads) ======
+async function pollCeleryJobStatus(taskId, isBulk = false) {
+  const maxAttempts = isBulk ? 120 : 60;  // 2 mins for single, 4 mins for bulk
+  let attempts = 0;
+
+  const pollInterval = setInterval(async () => {
+    attempts++;
+
+    try {
+      const response = await fetch(`/v2/jobs/celery/${taskId}`);
+
+      if (!response.ok) {
+        throw new Error("Failed to fetch job status");
+      }
+
+      const job = await response.json();
+
+      if (job.status === "completed") {
+        clearInterval(pollInterval);
+
+        if (isBulk) {
+          const result = job.result || {};
+          uploadStatus.textContent = `✅ Bulk upload complete! Processed ${result.successful || 0} of ${result.total || 0} resumes`;
+        } else {
+          uploadStatus.textContent = `✅ Resume processed! Candidate: ${job.result?.name || 'Unknown'}`;
+        }
+        
+        uploadStatus.style.color = "var(--success)";
+        uploadResumeBtn.disabled = false;
+        uploadResumeBtn.textContent = "Upload";
+
+        if (!isBulk && job.result) {
+          addMessage(
+            `Resume uploaded successfully!\nCandidate: ${job.result.name}\nID: ${job.result.candidate_id}`,
+            "bot"
+          );
+        }
+      } else if (job.status === "failed") {
+        clearInterval(pollInterval);
+
+        uploadStatus.textContent = `❌ Processing failed: ${job.error || 'Unknown error'}`;
+        uploadStatus.style.color = "var(--error)";
+
+        uploadResumeBtn.disabled = false;
+        uploadResumeBtn.textContent = "Upload";
+      } else {
+        const progress = job.progress || 0;
+        if (isBulk && progress > 0) {
+          uploadStatus.textContent = `⏳ Processing bulk upload... ${progress}%`;
+        } else {
+          uploadStatus.textContent = `⏳ Processing... (${attempts}s)`;
+        }
+      }
+
+      if (attempts >= maxAttempts) {
+        clearInterval(pollInterval);
+        uploadStatus.textContent = "⚠️ Processing taking longer than expected. Check back later.";
+        uploadStatus.style.color = "var(--warning)";
+        uploadResumeBtn.disabled = false;
+        uploadResumeBtn.textContent = "Upload";
+      }
+    } catch (err) {
+      console.error("Poll error:", err);
+    }
+  }, 2000);  // Poll every 2 seconds
 }
 
 // ==================== VOICE INPUT (BROWSER SR + WHISPER FALLBACK) ====================

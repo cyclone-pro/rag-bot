@@ -32,6 +32,7 @@ COLLECTION = os.getenv("MILVUS_COLLECTION", "candidates_v3")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "intfloat/e5-base-v2")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
 # ========================
 # Cache Configuration 
 # ========================
@@ -42,7 +43,7 @@ SEARCH_CACHE_TTL = int(os.getenv("SEARCH_CACHE_TTL", "300"))  # 5 minutes
 # ========================
 # Connection Pool Config
 # ========================
-ENABLE_CONNECTION_POOL = os.getenv("ENABLE_CONNECTION_POOL", "true").lower() == "true"
+ENABLE_CONNECTION_POOL = os.getenv("ENABLE_CONNECTION_POOL", "False").lower() == "false"
 MILVUS_POOL_SIZE = int(os.getenv("MILVUS_POOL_SIZE", "10"))
 MILVUS_POOL_MAX_AGE = int(os.getenv("MILVUS_POOL_MAX_AGE", "3600"))  # 1 hour
 MILVUS_POOL_MAX_USES = int(os.getenv("MILVUS_POOL_MAX_USES", "1000"))
@@ -53,6 +54,8 @@ MILVUS_POOL_HEALTH_CHECK_INTERVAL = int(os.getenv("MILVUS_POOL_HEALTH_CHECK_INTE
 VECTOR_TOP_K = 100        # ANN candidates
 KEYWORD_TOP_K = 50        # Keyword-matched candidates
 FINAL_RETURN = 20         # Results to user
+_milvus_pool = None
+USE_CELERY = os.getenv("USE_CELERY", "false").lower() == "true"
 
 # Vector search
 METRIC = "COSINE"
