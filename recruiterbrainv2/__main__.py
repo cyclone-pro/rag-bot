@@ -235,6 +235,9 @@ class ChatResponse(BaseModel):
     answer: Optional[str] = None
     error: Optional[str] = None
 
+class AnalyzeFitRequest(BaseModel):
+    job_description: str = Field(..., min_length=10, max_length=10000, description="Original job query/description")
+    candidate_id: str = Field(..., min_length=1, max_length=64, description="Candidate ID to analyze")
 
 class InsightRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=5000)
@@ -848,11 +851,10 @@ async def transcribe_audio(
             detail=f"Transcription failed: {str(e)}"
         )
 
-@app.post("/v2/erp_count")
+@app.post("/v2/analyze_fit")
 async def analyze_candidate_fit_endpoint(
     request: Request,
-    job_description: str = Field(..., description="Original job query/description"),
-    candidate_id: str = Field(..., description="Candidate ID to analyze")
+    payload: AnalyzeFitRequest  # Use the Pydantic model here
 ) -> Dict[str, Any]:
     """
     Deep candidate fit analysis (Phase 2).
@@ -884,87 +886,59 @@ async def analyze_candidate_fit_endpoint(
     """
     # Check rate limit (reuse chat limit)
     await check_rate_limit(request, "chat")
-    # Check cache with version awareness
-    cache = get_cache()
-    cache_key = generate_cache_key(
-        "fit_analysis",
-        candidate_id=candidate_id,
-        query_hash=hashlib.md5(job_description.encode()).hexdigest()[:8]
-    )
     
-    # Try to get from cache
-    if ENABLE_CACHE:
-        cached = cache.get(cache_key)
-        
-        if cached:
-            # Check if candidate was updated after cache
-            cached_version = cached.get("candidate_version", "")
-            
-            # Fetch current candidate version
-            current_candidate = client.query(
-                collection_name=COLLECTION,
-                filter=f'candidate_id == "{candidate_id}"',
-                output_fields=["last_updated"],
-                limit=1
-            )
-            
-            if current_candidate:
-                current_version = current_candidate[0].get("last_updated", "")
-                
-                # Compare versions
-                if current_version == cached_version:
-                    logger.info(f"✅ Cache HIT (version match): {candidate_id}")
-                    return cached
-                else:
-                    logger.info(f"⚠️  Cache STALE (version mismatch): {candidate_id}")
-                    cache.delete(cache_key)  # Invalidate stale cache
-    # Cache with version
-    if ENABLE_CACHE:
-        result["candidate_version"] = candidate.get("last_updated", "")
-        cache.set(cache_key, result, ttl=3600)  # 1 hour TTL
+    # Extract from payload
+    job_description = payload.job_description
+    candidate_id = payload.candidate_id
     
-    return result
     logger.info(f"🎯 Fit analysis requested: candidate={candidate_id}, query_len={len(job_description)}")
-    cache = get_cache()
-    cache_key = generate_cache_key(
-        "fit_analysis",
-        candidate_id=candidate_id,
-        query_hash=hashlib.md5(job_description.encode()).hexdigest()[:8]
-    )
-    candidate_version = candidate.get("last_updated", "")
-    # Try to get from cache
-    if ENABLE_CACHE:
-        cached = cache.get(cache_key)
-        
-        if cached:
-            # Check if candidate was updated after cache
-            cached_version = cached.get("candidate_version", "")
-            
-            # Fetch current candidate version
-            current_candidate = client.query(
-                collection_name=COLLECTION,
-                filter=f'candidate_id == "{candidate_id}"',
-                output_fields=["last_updated"],
-                limit=1
-            )
-            
-            if current_candidate:
-                current_version = current_candidate[0].get("last_updated", "")
-                
-                # Compare versions
-                if current_version == cached_version:
-                    logger.info(f"✅ Cache HIT (version match): {candidate_id}")
-                    return cached
-                else:
-                    logger.info(f"⚠️  Cache STALE (version mismatch): {candidate_id}")
-                    cache.delete(cache_key)
-
-    if ENABLE_CACHE:
-        result["candidate_version"] = candidate.get("last_updated", "")
-        cache.set(cache_key, result, ttl=3600)  # 1 hour TTL
+    
     try:
+        # Get Milvus client
+        client = get_milvus_client()
+        
+        # Check cache with version awareness
+        cache = get_cache()
+        cache_key = generate_cache_key(
+            "fit_analysis",
+            candidate_id=candidate_id,
+            query_hash=hashlib.md5(job_description.encode()).hexdigest()[:8]
+        )
+        
+        # Try to get from cache
+        if ENABLE_CACHE:
+            cached = cache.get(cache_key)
+            
+            if cached:
+                # Check if candidate was updated after cache
+                cached_version = cached.get("candidate_version", "")
+                
+                # Fetch current candidate version
+                try:
+                    current_candidate = client.query(
+                        collection_name=COLLECTION,
+                        filter=f'candidate_id == "{candidate_id}"',
+                        output_fields=["last_updated"],
+                        limit=1
+                    )
+                    
+                    if current_candidate:
+                        current_version = current_candidate[0].get("last_updated", "")
+                        
+                        # Compare versions
+                        if current_version == cached_version:
+                            logger.info(f"✅ Cache HIT (version match): {candidate_id}")
+                            return cached
+                        else:
+                            logger.info(f"⚠️  Cache STALE (version mismatch): {candidate_id}")
+                            cache.delete(cache_key)  # Invalidate stale cache
+                except Exception as cache_check_error:
+                    logger.warning(f"Cache version check failed: {cache_check_error}")
+                    # Continue with fresh analysis
+        
         # Step 1: Extract requirements from job description
         requirements = extract_requirements(job_description)
+        
         # CHECK FOR EXTRACTION ERRORS
         if requirements.get("error"):
             return {
@@ -977,14 +951,20 @@ async def analyze_candidate_fit_endpoint(
                 "strengths": [],
                 "weaknesses": [],
                 "recommendation": "Please provide a more detailed job description with specific skills and requirements.",
-                "error": requirements["error"]
+                "error": requirements["error"],
+                "matched_skills": [],
+                "missing_skills": [],
+                "critical_mismatch": None,
+                "onboarding_estimate": None,
+                "candidate_version": "",
+                "analyzed_at": datetime.utcnow().isoformat() + "Z"
             }
         
         # If no skills extracted at all
         if not requirements.get("must_have_skills") and not requirements.get("nice_to_have_skills"):
             return {
                 "candidate_id": candidate_id,
-                "candidate_name": candidate.get("name", "Unknown"),
+                "candidate_name": "Unknown",
                 "fit_level": "unknown",
                 "score": 0,
                 "fit_badge": "⚠️ NO REQUIREMENTS",
@@ -992,17 +972,21 @@ async def analyze_candidate_fit_endpoint(
                 "strengths": ["Cannot determine without requirements"],
                 "weaknesses": ["Cannot determine without requirements"],
                 "recommendation": "Please provide a job description that includes:\n- Required technical skills\n- Preferred technologies\n- Experience level\n- Domain expertise needed",
-                "error": "No requirements extracted"
+                "error": "No requirements extracted",
+                "matched_skills": [],
+                "missing_skills": [],
+                "critical_mismatch": None,
+                "onboarding_estimate": None,
+                "candidate_version": "",
+                "analyzed_at": datetime.utcnow().isoformat() + "Z"
             }
+        
         # Add original query text (needed for module detection)
         requirements["query_text"] = job_description
         
         logger.info(f"   Requirements: {len(requirements.get('must_have_skills', []))} skills, seniority={requirements.get('seniority_level')}")
         
         # Step 2: Fetch candidate from Milvus
-        client = get_milvus_client()
-        
-        # Query by candidate_id
         filter_expr = f'candidate_id == "{candidate_id}"'
         
         results = client.query(
@@ -1019,6 +1003,8 @@ async def analyze_candidate_fit_endpoint(
             )
         
         candidate = results[0]
+        candidate_version = candidate.get("last_updated", "")
+        
         logger.info(f"   Found candidate: {candidate.get('name')}")
         
         # Step 3: Compute quick match details (Phase 1)
@@ -1033,6 +1019,8 @@ async def analyze_candidate_fit_endpoint(
         logger.info(f"   Quick match: {quick_match['fit_level']} ({quick_match['match_percentage']}%)")
         
         # Step 4: Generate detailed analysis (Phase 2)
+        from .fit_analyzer import analyze_candidate_fit
+        
         analysis = analyze_candidate_fit(
             candidate=candidate,
             requirements=requirements,
@@ -1041,8 +1029,8 @@ async def analyze_candidate_fit_endpoint(
         
         logger.info(f"   ✅ Analysis complete: fit={analysis['fit_level']}")
         
-        # Step 5: Return results
-        return {
+        # Step 5: Prepare result
+        result = {
             "candidate_id": candidate_id,
             "candidate_name": candidate.get("name", "Unknown"),
             "fit_level": analysis["fit_level"],
@@ -1056,9 +1044,16 @@ async def analyze_candidate_fit_endpoint(
             "onboarding_estimate": analysis.get("onboarding_estimate"),
             "matched_skills": quick_match.get("matched_skills", []),
             "missing_skills": quick_match.get("missing_skills", []),
-            "candidate_version": candidate_version,  # Include version
+            "candidate_version": candidate_version,
             "analyzed_at": datetime.utcnow().isoformat() + "Z"
         }
+        
+        # Cache with version
+        if ENABLE_CACHE:
+            cache.set(cache_key, result, ttl=3600)  # 1 hour TTL
+            logger.info(f"   Cached result for {candidate_id}")
+        
+        return result
         
     except HTTPException:
         raise
@@ -1069,7 +1064,6 @@ async def analyze_candidate_fit_endpoint(
             status_code=500,
             detail=f"Fit analysis failed: {str(e)}"
         )
-
 # ==================== HEALTH CHECK ====================
 
 @app.get("/health")

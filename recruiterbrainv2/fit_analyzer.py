@@ -274,6 +274,88 @@ If the client also needs {candidate_mod} work, this candidate could be excellent
         # ... (implement similar pattern)
         pass
 
+def analyze_candidate_fit(
+    candidate: Dict[str, Any],
+    requirements: Dict[str, Any],
+    quick_match: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Comprehensive fit analysis for a candidate.
+    
+    Args:
+        candidate: Full candidate record from Milvus
+        requirements: Extracted requirements from query
+        quick_match: Results from compute_match_details_enhanced()
+    
+    Returns:
+        Detailed analysis report
+    """
+    
+    # STEP 1: VALIDATE DATA QUALITY
+    is_valid, missing_fields, warnings = validate_candidate_data(candidate)
+    
+    if not is_valid:
+        return {
+            "fit_level": "unknown",
+            "score": 0,
+            "fit_badge": "⚠️ INCOMPLETE DATA",
+            "explanation": f"Cannot analyze candidate due to missing data: {', '.join(missing_fields)}. Please update candidate record.",
+            "strengths": [],
+            "weaknesses": [f"Missing: {', '.join(missing_fields)}"],
+            "recommendation": "UPDATE CANDIDATE RECORD - Cannot provide reliable analysis without complete data.",
+            "critical_mismatch": None,
+            "data_quality_issues": missing_fields,
+            "data_warnings": warnings,
+            "onboarding_estimate": None
+        }
+    
+    # If we have warnings but can proceed
+    if warnings:
+        logger.warning(f"Data quality warnings for {candidate.get('candidate_id')}: {warnings}")
+    
+    # STEP 2: CHECK FOR REQUIREMENT CONFLICTS
+    conflicts = detect_requirement_conflicts(requirements)
+    conflict_note = ""
+    
+    if conflicts:
+        logger.warning(f"Requirement conflicts detected: {conflicts}")
+        conflict_note = "\n\n**Note:** Potential conflicts in job requirements:\n" + \
+                       "\n".join(f"- {c}" for c in conflicts)
+    
+    # STEP 3: HANDLE CRITICAL MISMATCHES
+    if quick_match.get("critical_mismatch"):
+        analysis = generate_critical_mismatch_report(
+            candidate,
+            requirements,
+            quick_match
+        )
+        
+        # Add warnings if exist
+        if warnings:
+            analysis["data_warnings"] = warnings
+        
+        # Add conflicts if exist
+        if conflict_note:
+            analysis["explanation"] += conflict_note
+        
+        return analysis
+    
+    # STEP 4: GENERATE FULL FIT REPORT
+    analysis = generate_fit_report(
+        candidate,
+        requirements,
+        quick_match
+    )
+    
+    # Add warnings if exist
+    if warnings:
+        analysis["data_warnings"] = warnings
+    
+    # Add conflicts if exist
+    if conflict_note:
+        analysis["explanation"] += conflict_note
+    
+    return analysis
 
 def generate_fit_report(
     candidate: Dict[str, Any],
