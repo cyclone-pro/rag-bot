@@ -167,6 +167,33 @@ def extract_requirements(query_text: str) -> Dict[str, Any]:
             "remote_preference": "Hybrid"
         }
     """
+    # VALIDATION: Check query length
+    if len(query_text.strip()) < 10:
+        return {
+            "must_have_skills": [],
+            "nice_to_have_skills": [],
+            "seniority_level": "Any",
+            "industry": None,
+            "years_experience_min": None,
+            "role_type": None,
+            "query_text": query_text,
+            "error": "Query too short. Please provide more details about requirements."
+        }
+      # VALIDATION: Check for generic terms only
+    generic_only = all(word in query_text.lower() for word in ["find", "developer", "engineer"])
+    word_count = len(query_text.split())
+    
+    if generic_only and word_count < 5:
+        return {
+            "must_have_skills": [],
+            "nice_to_have_skills": [],
+            "seniority_level": "Any",
+            "industry": None,
+            "years_experience_min": None,
+            "role_type": None,
+            "query_text": query_text,
+            "error": "Query too generic. Please specify skills, technologies, or requirements."
+        }
     # Quick seniority detection
     seniority = _detect_seniority_fast(query_text)
     

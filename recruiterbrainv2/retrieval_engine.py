@@ -229,6 +229,7 @@ def search_candidates_v2(
         "requirements": requirements,
         "search_mode": search_mode,
         "query": query,
+        "original_query": query
     }
     
     # ==================== CACHE RESULT ====================

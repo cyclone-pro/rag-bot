@@ -1,7 +1,9 @@
 """FastAPI entrypoint for RecruiterBrain v2."""
 from __future__ import annotations
+import hashlib
 import os
 import sys
+from celery import result
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse  
 from fastapi.templating import Jinja2Templates
@@ -19,9 +21,15 @@ from fastapi import BackgroundTasks
 from fastapi import Response
 import zipfile
 import io
+
+from pymilvus import client
+
+from recruiterbrainv2.config import COLLECTION, ENABLE_CACHE, SEARCH_OUTPUT_FIELDS, get_milvus_client
 from .jobs import get_job_store, JobStatus
 from .workers import process_resume_upload
 from .celery_app import celery_app
+from .cache import get_cache, generate_cache_key
+
 from .tasks import process_resume_task, bulk_process_resumes
 from .formatter import format_for_chat, format_for_insight
 from .retrieval_engine import search_candidates_v2, invalidate_search_cache
@@ -35,7 +43,8 @@ from .ingestion import (
     insert_candidate,
 )
 from .audio_transcription import transcribe_audio_whisper
-
+from .fit_analyzer import analyze_candidate_fit
+from .skill_extractor import extract_requirements
 # ==================== LOGGING SETUP ====================
 logging.basicConfig(
     level=logging.INFO,
@@ -838,6 +847,229 @@ async def transcribe_audio(
             status_code=500,
             detail=f"Transcription failed: {str(e)}"
         )
+
+@app.post("/v2/erp_count")
+async def analyze_candidate_fit_endpoint(
+    request: Request,
+    job_description: str = Field(..., description="Original job query/description"),
+    candidate_id: str = Field(..., description="Candidate ID to analyze")
+) -> Dict[str, Any]:
+    """
+    Deep candidate fit analysis (Phase 2).
+    
+    Called when user clicks "Why?" button in insight mode.
+    
+    Rate limit: 20 requests per minute (same as chat).
+    
+    Request body:
+    {
+        "job_description": "Find Oracle Fusion ERP developers...",
+        "candidate_id": "D6DA7C"
+    }
+    
+    Response:
+    {
+        "candidate_id": "D6DA7C",
+        "candidate_name": "Athreya Sunki",
+        "fit_level": "not_fit",
+        "score": 20,
+        "fit_badge": "❌ NOT A FIT",
+        "explanation": "Detailed explanation...",
+        "strengths": [...],
+        "weaknesses": [...],
+        "recommendation": "DO NOT PROCEED...",
+        "critical_mismatch": {...},
+        "onboarding_estimate": {...}
+    }
+    """
+    # Check rate limit (reuse chat limit)
+    await check_rate_limit(request, "chat")
+    # Check cache with version awareness
+    cache = get_cache()
+    cache_key = generate_cache_key(
+        "fit_analysis",
+        candidate_id=candidate_id,
+        query_hash=hashlib.md5(job_description.encode()).hexdigest()[:8]
+    )
+    
+    # Try to get from cache
+    if ENABLE_CACHE:
+        cached = cache.get(cache_key)
+        
+        if cached:
+            # Check if candidate was updated after cache
+            cached_version = cached.get("candidate_version", "")
+            
+            # Fetch current candidate version
+            current_candidate = client.query(
+                collection_name=COLLECTION,
+                filter=f'candidate_id == "{candidate_id}"',
+                output_fields=["last_updated"],
+                limit=1
+            )
+            
+            if current_candidate:
+                current_version = current_candidate[0].get("last_updated", "")
+                
+                # Compare versions
+                if current_version == cached_version:
+                    logger.info(f"✅ Cache HIT (version match): {candidate_id}")
+                    return cached
+                else:
+                    logger.info(f"⚠️  Cache STALE (version mismatch): {candidate_id}")
+                    cache.delete(cache_key)  # Invalidate stale cache
+    # Cache with version
+    if ENABLE_CACHE:
+        result["candidate_version"] = candidate.get("last_updated", "")
+        cache.set(cache_key, result, ttl=3600)  # 1 hour TTL
+    
+    return result
+    logger.info(f"🎯 Fit analysis requested: candidate={candidate_id}, query_len={len(job_description)}")
+    cache = get_cache()
+    cache_key = generate_cache_key(
+        "fit_analysis",
+        candidate_id=candidate_id,
+        query_hash=hashlib.md5(job_description.encode()).hexdigest()[:8]
+    )
+    candidate_version = candidate.get("last_updated", "")
+    # Try to get from cache
+    if ENABLE_CACHE:
+        cached = cache.get(cache_key)
+        
+        if cached:
+            # Check if candidate was updated after cache
+            cached_version = cached.get("candidate_version", "")
+            
+            # Fetch current candidate version
+            current_candidate = client.query(
+                collection_name=COLLECTION,
+                filter=f'candidate_id == "{candidate_id}"',
+                output_fields=["last_updated"],
+                limit=1
+            )
+            
+            if current_candidate:
+                current_version = current_candidate[0].get("last_updated", "")
+                
+                # Compare versions
+                if current_version == cached_version:
+                    logger.info(f"✅ Cache HIT (version match): {candidate_id}")
+                    return cached
+                else:
+                    logger.info(f"⚠️  Cache STALE (version mismatch): {candidate_id}")
+                    cache.delete(cache_key)
+
+    if ENABLE_CACHE:
+        result["candidate_version"] = candidate.get("last_updated", "")
+        cache.set(cache_key, result, ttl=3600)  # 1 hour TTL
+    try:
+        # Step 1: Extract requirements from job description
+        requirements = extract_requirements(job_description)
+        # CHECK FOR EXTRACTION ERRORS
+        if requirements.get("error"):
+            return {
+                "candidate_id": candidate_id,
+                "candidate_name": "Unknown",
+                "fit_level": "unknown",
+                "score": 0,
+                "fit_badge": "⚠️ UNCLEAR REQUIREMENTS",
+                "explanation": f"Cannot analyze fit: {requirements['error']}",
+                "strengths": [],
+                "weaknesses": [],
+                "recommendation": "Please provide a more detailed job description with specific skills and requirements.",
+                "error": requirements["error"]
+            }
+        
+        # If no skills extracted at all
+        if not requirements.get("must_have_skills") and not requirements.get("nice_to_have_skills"):
+            return {
+                "candidate_id": candidate_id,
+                "candidate_name": candidate.get("name", "Unknown"),
+                "fit_level": "unknown",
+                "score": 0,
+                "fit_badge": "⚠️ NO REQUIREMENTS",
+                "explanation": "No technical skills or requirements were detected in the job description. Unable to perform meaningful fit analysis.",
+                "strengths": ["Cannot determine without requirements"],
+                "weaknesses": ["Cannot determine without requirements"],
+                "recommendation": "Please provide a job description that includes:\n- Required technical skills\n- Preferred technologies\n- Experience level\n- Domain expertise needed",
+                "error": "No requirements extracted"
+            }
+        # Add original query text (needed for module detection)
+        requirements["query_text"] = job_description
+        
+        logger.info(f"   Requirements: {len(requirements.get('must_have_skills', []))} skills, seniority={requirements.get('seniority_level')}")
+        
+        # Step 2: Fetch candidate from Milvus
+        client = get_milvus_client()
+        
+        # Query by candidate_id
+        filter_expr = f'candidate_id == "{candidate_id}"'
+        
+        results = client.query(
+            collection_name=COLLECTION,
+            filter=filter_expr,
+            output_fields=SEARCH_OUTPUT_FIELDS,
+            limit=1
+        )
+        
+        if not results:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Candidate {candidate_id} not found"
+            )
+        
+        candidate = results[0]
+        logger.info(f"   Found candidate: {candidate.get('name')}")
+        
+        # Step 3: Compute quick match details (Phase 1)
+        from .ranker import compute_match_details_enhanced
+        
+        quick_match = compute_match_details_enhanced(
+            candidate=candidate,
+            required_skills=requirements.get("must_have_skills", []),
+            requirements=requirements
+        )
+        
+        logger.info(f"   Quick match: {quick_match['fit_level']} ({quick_match['match_percentage']}%)")
+        
+        # Step 4: Generate detailed analysis (Phase 2)
+        analysis = analyze_candidate_fit(
+            candidate=candidate,
+            requirements=requirements,
+            quick_match=quick_match
+        )
+        
+        logger.info(f"   ✅ Analysis complete: fit={analysis['fit_level']}")
+        
+        # Step 5: Return results
+        return {
+            "candidate_id": candidate_id,
+            "candidate_name": candidate.get("name", "Unknown"),
+            "fit_level": analysis["fit_level"],
+            "score": analysis["score"],
+            "fit_badge": analysis["fit_badge"],
+            "explanation": analysis["explanation"],
+            "strengths": analysis["strengths"],
+            "weaknesses": analysis["weaknesses"],
+            "recommendation": analysis["recommendation"],
+            "critical_mismatch": analysis.get("critical_mismatch"),
+            "onboarding_estimate": analysis.get("onboarding_estimate"),
+            "matched_skills": quick_match.get("matched_skills", []),
+            "missing_skills": quick_match.get("missing_skills", []),
+            "candidate_version": candidate_version,  # Include version
+            "analyzed_at": datetime.utcnow().isoformat() + "Z"
+        }
+        
+    except HTTPException:
+        raise
+    
+    except Exception as e:
+        logger.exception(f"❌ Fit analysis failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Fit analysis failed: {str(e)}"
+        )
+
 # ==================== HEALTH CHECK ====================
 
 @app.get("/health")

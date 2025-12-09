@@ -229,7 +229,9 @@ def detect_critical_mismatch(
 
 def _check_oracle_module_mismatch(candidate, requirements):
     """Check for Oracle HCM vs ERP vs CX mismatch."""
-    
+    if not is_module_specific_role(requirements):
+        logger.info("Role is Oracle module-agnostic, skipping module mismatch check")
+        return None
     query_text = requirements.get("query_text", "").lower()
     
     # Detect required module
@@ -272,26 +274,88 @@ def _check_oracle_module_mismatch(candidate, requirements):
     hcm_count = sum(1 for term in hcm_indicators if term in candidate_text)
     erp_count = sum(1 for term in erp_indicators if term in candidate_text)
     cx_count = sum(1 for term in cx_indicators if term in candidate_text)
+    logger.info(f"Oracle module scores - HCM: {hcm_count}, ERP: {erp_count}")
+    if hcm_count == 0 and erp_count == 0:
+        return None
+    if hcm_count > 0 and erp_count > 0:
+        # Check which is dominant
+        ratio = max(hcm_count, erp_count) / min(hcm_count, erp_count)
+        
+        if ratio < 2:  # Fairly balanced experience
+            # Check if required module is present
+            if required_module == "ERP" and erp_count >= hcm_count:
+                return None  # Has ERP experience, no mismatch
+            elif required_module == "HCM" and hcm_count >= erp_count:
+                return None  # Has HCM experience, no mismatch
+            elif required_module == "ERP" and hcm_count > erp_count:
+                # HCM dominant but has some ERP
+                return {
+                    "type": "oracle_module_mismatch",
+                    "required": "ERP",
+                    "candidate_has": "Mixed (HCM-dominant)",
+                    "short_reason": f"Primarily HCM experience, limited ERP background",
+                    "severity": "medium",  # Not critical, has some exposure
+                    "note": f"Candidate has mixed Oracle experience (HCM: {hcm_count} mentions, ERP: {erp_count} mentions)"
+                }
+        
+        # One module is clearly dominant
+        if hcm_count > erp_count * 2:
+            candidate_module = "HCM"
+        else:
+            candidate_module = "ERP"
     
-    if hcm_count > erp_count and hcm_count > cx_count:
+    # SINGLE MODULE EXPERIENCE
+    elif hcm_count > erp_count:
         candidate_module = "HCM"
-    elif erp_count > hcm_count and erp_count > cx_count:
+    else:
         candidate_module = "ERP"
-    elif cx_count > hcm_count and cx_count > erp_count:
-        candidate_module = "CX"
     
-    # Check for mismatch
-    if required_module and candidate_module and required_module != candidate_module:
+    # Check for critical mismatch
+    if required_module != candidate_module:
         return {
             "type": "oracle_module_mismatch",
             "required": required_module,
             "candidate_has": candidate_module,
-            "short_reason": f"Oracle {required_module} required, candidate has {candidate_module}",
+            "short_reason": f"Oracle {required_module} required, candidate specializes in {candidate_module}",
             "severity": "critical"
         }
     
-    return None
-
+    return None  # No 
+def is_module_specific_role(requirements: Dict[str, Any]) -> bool:
+    """
+    Determine if role requires specific Oracle module expertise
+    or is module-agnostic.
+    """
+    query = requirements.get("query_text", "").lower()
+    
+    # Module-agnostic indicators
+    agnostic_indicators = [
+        "oracle cloud integration",
+        "oracle middleware",
+        "oracle database",
+        "oracle infrastructure",
+        "oracle administration",
+        "oracle dba",
+        "oracle cloud platform",
+        "oci integration"  # Oracle Cloud Infrastructure (platform level)
+    ]
+    
+    if any(indicator in query for indicator in agnostic_indicators):
+        return False  # Not module-specific
+    
+    # Module-specific indicators
+    module_specific = [
+        "fusion hcm", "fusion erp", "fusion cx",
+        "financials", "scm", "supply chain",
+        "payroll", "talent management", "core hr",
+        "sales cloud", "service cloud"
+    ]
+    
+    if any(indicator in query for indicator in module_specific):
+        return True  # Module-specific
+    
+    # Default: assume module-agnostic if unclear
+    return False
 
 def _check_experience_gap(candidate, requirements):
     """Check for severe experience gap (< 50% of required)."""

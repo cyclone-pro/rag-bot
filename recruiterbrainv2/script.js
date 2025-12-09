@@ -344,7 +344,7 @@ async function openFitModal(candidateId) {
         const analysis = await response.json();
         
         // Render analysis in modal
-        renderFitModal(analysis);
+        erp_count(analysis);
         
     } catch (error) {
         console.error('Fit analysis error:', error);
@@ -376,17 +376,40 @@ function showFitModalLoading(candidateId) {
     setTimeout(() => modal.classList.add('active'), 10);
 }
 
-function renderFitModal(analysis) {
-    const modal = document.querySelector('.fit-analysis-modal');
-    if (analysis.data_quality_issues && analysis.data_quality_issues.length > 0) {
+function erp_count(analysis) {
+  const modal = document.querySelector('.fit-analysis-modal');
+  
+  if (!modal) return;
+  
+  // Check for data quality issues first
+  if (analysis.data_quality_issues && analysis.data_quality_issues.length > 0) {
       return renderDataQualityError(analysis);
   }
-    if (!modal) return;
-    
-    const fitLevelClass = getFitLevelClass(analysis.fit_level);
-    const isCritical = analysis.critical_mismatch !== null;
-    if (analysis.data_warnings && analysis.data_warnings.length > 0) {
-      const warningBanner = `
+  
+  const fitLevelClass = getFitLevelClass(analysis.fit_level);
+  const isCritical = analysis.critical_mismatch !== null;
+  
+  // Check freshness
+  const analyzedAt = new Date(analysis.analyzed_at);
+  const ageMinutes = (Date.now() - analyzedAt.getTime()) / 60000;
+  
+  let freshnessWarning = '';
+  if (ageMinutes > 60) {
+      freshnessWarning = `
+          <div class="freshness-warning">
+              ⚠️ This analysis is ${Math.round(ageMinutes / 60)} hours old. 
+              Candidate data may have changed. 
+              <button onclick="refreshAnalysis('${analysis.candidate_id}')">
+                  Refresh Analysis
+              </button>
+          </div>
+      `;
+  }
+  
+  // Check for data warnings
+  let warningBanner = '';
+  if (analysis.data_warnings && analysis.data_warnings.length > 0) {
+      warningBanner = `
           <div class="data-warning-banner">
               <span class="warning-icon">⚠️</span>
               <div>
@@ -396,131 +419,132 @@ function renderFitModal(analysis) {
               </div>
           </div>
       `;
-      
   }
-    modal.innerHTML = `
-        
-        <div class="modal-content fit-modal ${fitLevelClass}">
-            <!-- Header -->
-            <div class="modal-header">
-                <div class="modal-title-section">
-                    <h2>${escapeHtml(analysis.candidate_name)}</h2>
-                    <div class="fit-badge-large ${fitLevelClass}">
-                        ${analysis.fit_badge}
-                    </div>
-                    <div class="fit-score">${analysis.score}% Match</div>
-                </div>
-                <button class="modal-close" onclick="closeFitModal()">&times;</button>
-            </div>
-            
-            <!-- Body -->
-            <div class="modal-body">
-                ${isCritical ? renderCriticalMismatch(analysis) : ''}
-                
-                <!-- Explanation Section -->
-                <div class="analysis-section">
-                    <h3>📊 Fit Analysis</h3>
-                    <div class="explanation-text">
-                        ${formatMarkdown(analysis.explanation)}
-                    </div>
-                </div>
-                
-                <!-- Strengths Section -->
-                ${analysis.strengths && analysis.strengths.length > 0 ? `
-                    <div class="analysis-section strengths-section">
-                        <h3>💪 Strengths</h3>
-                        <ul class="strength-list">
-                            ${analysis.strengths.map(s => 
-                                `<li class="strength-item">✓ ${escapeHtml(s)}</li>`
-                            ).join('')}
-                        </ul>
-                    </div>
-                ` : ''}
-                
-                <!-- Weaknesses Section -->
-                ${analysis.weaknesses && analysis.weaknesses.length > 0 ? `
-                    <div class="analysis-section weaknesses-section">
-                        <h3>⚠️ Areas of Concern</h3>
-                        <ul class="weakness-list">
-                            ${analysis.weaknesses.map(w => 
-                                `<li class="weakness-item">✗ ${escapeHtml(w)}</li>`
-                            ).join('')}
-                        </ul>
-                    </div>
-                ` : ''}
-                
-                <!-- Skills Breakdown -->
-                <div class="analysis-section skills-breakdown">
-                    <h3>🔧 Skills Breakdown</h3>
-                    <div class="skills-grid">
-                        <div class="skills-column">
-                            <h4>Matched Skills (${analysis.matched_skills.length})</h4>
-                            <div class="skill-tags">
-                                ${analysis.matched_skills.slice(0, 10).map(s => 
-                                    `<span class="skill-tag matched">✓ ${escapeHtml(s)}</span>`
-                                ).join('')}
-                            </div>
-                        </div>
-                        <div class="skills-column">
-                            <h4>Missing Skills (${analysis.missing_skills.length})</h4>
-                            <div class="skill-tags">
-                                ${analysis.missing_skills.slice(0, 10).map(s => 
-                                    `<span class="skill-tag missing">✗ ${escapeHtml(s)}</span>`
-                                ).join('')}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Onboarding Estimate -->
-                ${analysis.onboarding_estimate ? `
-                    <div class="analysis-section onboarding-section">
-                        <h3>📅 Onboarding Estimate</h3>
-                        <div class="onboarding-grid">
-                            <div class="onboarding-item">
-                                <span class="label">Time to Productivity:</span>
-                                <span class="value">${analysis.onboarding_estimate.time_to_productivity}</span>
-                            </div>
-                            <div class="onboarding-item">
-                                <span class="label">Training Cost:</span>
-                                <span class="value">${analysis.onboarding_estimate.training_cost_range}</span>
-                            </div>
-                            <div class="onboarding-item">
-                                <span class="label">Risk Level:</span>
-                                <span class="value risk-${analysis.onboarding_estimate.risk_level.toLowerCase()}">
-                                    ${analysis.onboarding_estimate.risk_level}
-                                </span>
-                            </div>
-                            ${analysis.onboarding_estimate.notes ? `
-                                <div class="onboarding-item full-width">
-                                    <span class="label">Notes:</span>
-                                    <span class="value">${escapeHtml(analysis.onboarding_estimate.notes)}</span>
-                                </div>
-                            ` : ''}
-                        </div>
-                    </div>
-                ` : ''}
-                
-                <!-- Recommendation Section -->
-                <div class="analysis-section recommendation-section ${fitLevelClass}">
-                    <h3>📋 Hiring Recommendation</h3>
-                    <div class="recommendation-text">
-                        ${formatMarkdown(analysis.recommendation)}
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Footer -->
-            <div class="modal-footer">
-                <button class="btn-secondary" onclick="closeFitModal()">Close</button>
-                ${analysis.fit_level === 'excellent' || analysis.fit_level === 'good' ? `
-                    <button class="btn-primary" onclick="scheduleInterview('${analysis.candidate_id}')">
-                        📅 Schedule Interview
-                    </button>
-                ` : ''}
-            </div>
-        </div>
-    `;
+  
+  modal.innerHTML = `
+      <div class="modal-content fit-modal ${fitLevelClass}">
+          <!-- Header -->
+          <div class="modal-header">
+              <div class="modal-title-section">
+                  <h2>${escapeHtml(analysis.candidate_name)}</h2>
+                  <div class="fit-badge-large ${fitLevelClass}">
+                      ${analysis.fit_badge}
+                  </div>
+                  <div class="fit-score">${analysis.score}% Match</div>
+              </div>
+              <button class="modal-close" onclick="closeFitModal()">&times;</button>
+          </div>
+          
+          <!-- Body -->
+          <div class="modal-body">
+              ${freshnessWarning}
+              ${warningBanner}
+              ${isCritical ? renderCriticalMismatch(analysis) : ''}
+              
+              <!-- Explanation Section -->
+              <div class="analysis-section">
+                  <h3>📊 Fit Analysis</h3>
+                  <div class="explanation-text">
+                      ${formatMarkdown(analysis.explanation)}
+                  </div>
+              </div>
+              
+              <!-- Strengths Section -->
+              ${analysis.strengths && analysis.strengths.length > 0 ? `
+                  <div class="analysis-section strengths-section">
+                      <h3>💪 Strengths</h3>
+                      <ul class="strength-list">
+                          ${analysis.strengths.map(s => 
+                              `<li class="strength-item">✓ ${escapeHtml(s)}</li>`
+                          ).join('')}
+                      </ul>
+                  </div>
+              ` : ''}
+              
+              <!-- Weaknesses Section -->
+              ${analysis.weaknesses && analysis.weaknesses.length > 0 ? `
+                  <div class="analysis-section weaknesses-section">
+                      <h3>⚠️ Areas of Concern</h3>
+                      <ul class="weakness-list">
+                          ${analysis.weaknesses.map(w => 
+                              `<li class="weakness-item">✗ ${escapeHtml(w)}</li>`
+                          ).join('')}
+                      </ul>
+                  </div>
+              ` : ''}
+              
+              <!-- Skills Breakdown -->
+              <div class="analysis-section skills-breakdown">
+                  <h3>🔧 Skills Breakdown</h3>
+                  <div class="skills-grid">
+                      <div class="skills-column">
+                          <h4>Matched Skills (${analysis.matched_skills.length})</h4>
+                          <div class="skill-tags">
+                              ${analysis.matched_skills.slice(0, 10).map(s => 
+                                  `<span class="skill-tag matched">✓ ${escapeHtml(s)}</span>`
+                              ).join('')}
+                          </div>
+                      </div>
+                      <div class="skills-column">
+                          <h4>Missing Skills (${analysis.missing_skills.length})</h4>
+                          <div class="skill-tags">
+                              ${analysis.missing_skills.slice(0, 10).map(s => 
+                                  `<span class="skill-tag missing">✗ ${escapeHtml(s)}</span>`
+                              ).join('')}
+                          </div>
+                      </div>
+                  </div>
+              </div>
+              
+              <!-- Onboarding Estimate -->
+              ${analysis.onboarding_estimate ? `
+                  <div class="analysis-section onboarding-section">
+                      <h3>📅 Onboarding Estimate</h3>
+                      <div class="onboarding-grid">
+                          <div class="onboarding-item">
+                              <span class="label">Time to Productivity:</span>
+                              <span class="value">${analysis.onboarding_estimate.time_to_productivity}</span>
+                          </div>
+                          <div class="onboarding-item">
+                              <span class="label">Training Cost:</span>
+                              <span class="value">${analysis.onboarding_estimate.training_cost_range}</span>
+                          </div>
+                          <div class="onboarding-item">
+                              <span class="label">Risk Level:</span>
+                              <span class="value risk-${analysis.onboarding_estimate.risk_level.toLowerCase()}">
+                                  ${analysis.onboarding_estimate.risk_level}
+                              </span>
+                          </div>
+                          ${analysis.onboarding_estimate.notes ? `
+                              <div class="onboarding-item full-width">
+                                  <span class="label">Notes:</span>
+                                  <span class="value">${escapeHtml(analysis.onboarding_estimate.notes)}</span>
+                              </div>
+                          ` : ''}
+                      </div>
+                  </div>
+              ` : ''}
+              
+              <!-- Recommendation Section -->
+              <div class="analysis-section recommendation-section ${fitLevelClass}">
+                  <h3>📋 Hiring Recommendation</h3>
+                  <div class="recommendation-text">
+                      ${formatMarkdown(analysis.recommendation)}
+                  </div>
+              </div>
+          </div>
+          
+          <!-- Footer -->
+          <div class="modal-footer">
+              <button class="btn-secondary" onclick="closeFitModal()">Close</button>
+              ${analysis.fit_level === 'excellent' || analysis.fit_level === 'good' ? `
+                  <button class="btn-primary" onclick="scheduleInterview('${analysis.candidate_id}')">
+                      📅 Schedule Interview
+                  </button>
+              ` : ''}
+          </div>
+      </div>
+  `;
 }
 function renderDataQualityError(analysis) {
   const modal = document.querySelector('.fit-analysis-modal');
@@ -1121,7 +1145,7 @@ async function openFitModal(candidateId) {
           }
           
           const analysis = await response.json();
-          renderFitModal(analysis);
+          erp_count(analysis);
           return;  // Success, exit
           
       } catch (error) {

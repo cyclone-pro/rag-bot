@@ -6,13 +6,13 @@ Provides comprehensive analysis beyond quick match percentage.
 """
 
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
-def analyze_candidate_fit(
+def erp_count(
     candidate: Dict[str, Any],
     requirements: Dict[str, Any],
     quick_match: Dict[str, Any]
@@ -29,21 +29,115 @@ def analyze_candidate_fit(
         Detailed analysis report
     """
     
-    # If critical mismatch, generate detailed explanation
+    # STEP 1: VALIDATE DATA QUALITY
+    is_valid, missing_fields, warnings = validate_candidate_data(candidate)
+    
+    if not is_valid:
+        return {
+            "fit_level": "unknown",
+            "score": 0,
+            "fit_badge": "⚠️ INCOMPLETE DATA",
+            "explanation": f"Cannot analyze candidate due to missing data: {', '.join(missing_fields)}. Please update candidate record.",
+            "strengths": [],
+            "weaknesses": [f"Missing: {', '.join(missing_fields)}"],
+            "recommendation": "UPDATE CANDIDATE RECORD - Cannot provide reliable analysis without complete data.",
+            "critical_mismatch": None,
+            "data_quality_issues": missing_fields,
+            "data_warnings": warnings,
+            "onboarding_estimate": None
+        }
+    
+    # If we have warnings but can proceed
+    if warnings:
+        logger.warning(f"Data quality warnings for {candidate.get('candidate_id')}: {warnings}")
+    
+    # STEP 2: CHECK FOR REQUIREMENT CONFLICTS
+    conflicts = detect_requirement_conflicts(requirements)
+    conflict_note = ""
+    
+    if conflicts:
+        logger.warning(f"Requirement conflicts detected: {conflicts}")
+        conflict_note = "\n\n**Note:** Potential conflicts in job requirements:\n" + \
+                       "\n".join(f"- {c}" for c in conflicts)
+    
+    # STEP 3: HANDLE CRITICAL MISMATCHES
     if quick_match.get("critical_mismatch"):
-        return generate_critical_mismatch_report(
+        analysis = generate_critical_mismatch_report(
             candidate,
             requirements,
             quick_match
         )
+        
+        # Add warnings if exist
+        if warnings:
+            analysis["data_warnings"] = warnings
+        
+        # Add conflicts if exist
+        if conflict_note:
+            analysis["explanation"] += conflict_note
+        
+        return analysis
     
-    # Otherwise, generate full fit analysis
-    return generate_fit_report(
+    # STEP 4: GENERATE FULL FIT REPORT
+    analysis = generate_fit_report(
         candidate,
         requirements,
         quick_match
     )
+    
+    # Add warnings if exist
+    if warnings:
+        analysis["data_warnings"] = warnings
+    
+    # Add conflicts if exist
+    if conflict_note:
+        analysis["explanation"] += conflict_note
+    
+    return analysis
 
+
+def detect_requirement_conflicts(requirements: Dict[str, Any]) -> List[str]:
+    """Detect contradictory requirements."""
+    
+    conflicts = []
+    
+    # Conflict 1: Seniority vs Experience mismatch
+    seniority = requirements.get("seniority_level", "")
+    min_exp = requirements.get("years_experience_min", 0)
+    
+    seniority_exp_map = {
+        "Entry": (0, 3),
+        "Mid": (3, 7),
+        "Senior": (7, 15),
+        "Lead/Manager": (8, 20),
+        "Director+": (10, 30)
+    }
+    
+    if seniority and seniority in seniority_exp_map:
+        expected_range = seniority_exp_map[seniority]
+        if min_exp > 0 and (min_exp < expected_range[0] or min_exp > expected_range[1]):
+            conflicts.append(
+                f"Seniority '{seniority}' typically requires {expected_range[0]}-{expected_range[1]} years, "
+                f"but {min_exp} years specified"
+            )
+    
+    # Conflict 2: Must-have skills include mutually exclusive tech
+    must_have = [s.lower() for s in requirements.get("must_have_skills", [])]
+    
+    # Check for framework conflicts
+    framework_conflicts = [
+        (["react", "angular", "vue"], "frontend framework"),
+        (["django", "flask", "fastapi"], "Python framework"),
+    ]
+    
+    for frameworks, category in framework_conflicts:
+        matching = [f for f in frameworks if f in must_have]
+        if len(matching) >= 3:
+            conflicts.append(
+                f"Requires expertise in multiple competing {category}s: {', '.join(matching)}"
+            )
+    
+    return conflicts
 
 def generate_critical_mismatch_report(candidate, requirements, quick_match):
     """Generate detailed report for critical mismatches."""
@@ -181,9 +275,14 @@ If the client also needs {candidate_mod} work, this candidate could be excellent
         pass
 
 
-def generate_fit_report(candidate, requirements, quick_match):
+def generate_fit_report(
+    candidate: Dict[str, Any],
+    requirements: Dict[str, Any],
+    quick_match: Dict[str, Any]
+) -> Dict[str, Any]:
     """Generate comprehensive fit report for non-critical cases."""
     
+    # Analyze different aspects
     strengths = analyze_strengths(candidate, requirements, quick_match)
     weaknesses = analyze_weaknesses(candidate, requirements, quick_match)
     recommendation = generate_recommendation(
@@ -207,7 +306,164 @@ def generate_fit_report(candidate, requirements, quick_match):
         "onboarding_estimate": onboarding,
         "critical_mismatch": None
     }
+def generate_fit_explanation(
+    candidate: Dict[str, Any],
+    requirements: Dict[str, Any],
+    quick_match: Dict[str, Any],
+    strengths: List[str],
+    weaknesses: List[str]
+) -> str:
+    """Generate narrative explanation of fit with length limit."""
+    
+    fit_level = quick_match["fit_level"]
+    match_pct = quick_match["match_percentage"]
+    name = candidate.get("name", "This candidate")
+    
+    # Opening
+    if fit_level == "excellent":
+        opening = f"{name} is an **excellent match** for this role with {match_pct}% technical alignment."
+    elif fit_level == "good":
+        opening = f"{name} is a **strong match** for this role with {match_pct}% technical alignment."
+    elif fit_level == "partial":
+        opening = f"{name} shows **partial alignment** with this role ({match_pct}% match) with notable skill gaps."
+    else:
+        opening = f"{name} has **limited alignment** with this role ({match_pct}% match) and significant skill gaps."
+    
+    # Strengths summary
+    strength_summary = ""
+    if strengths:
+        top_strengths = strengths[:3]
+        strength_summary = "\n\n**Key Strengths:**\n" + "\n".join(f"- {s}" for s in top_strengths)
+    
+    # Weaknesses summary
+    weakness_summary = ""
+    if weaknesses:
+        top_weaknesses = weaknesses[:3]
+        weakness_summary = "\n\n**Areas of Concern:**\n" + "\n".join(f"- {w}" for w in top_weaknesses)
+    
+    # Closing assessment
+    if fit_level in ["excellent", "good"]:
+        closing = f"\n\n**Overall Assessment:** {name} has the core skills and experience needed for success in this role. {' Minor gaps can be addressed through training.' if weaknesses else ''}"
+    else:
+        closing = f"\n\n**Overall Assessment:** The skill gaps are significant and would require substantial investment in training and development."
+    
+    explanation = opening + strength_summary + weakness_summary + closing
+    
+    # Limit length (frontend can handle ~5000 chars comfortably)
+    MAX_LENGTH = 4000
+    
+    if len(explanation) > MAX_LENGTH:
+        explanation = explanation[:MAX_LENGTH]
+        # Find last complete sentence
+        last_period = explanation.rfind('.')
+        if last_period > MAX_LENGTH - 200:
+            explanation = explanation[:last_period + 1]
+        explanation += "\n\n[Analysis truncated for brevity]"
+    
+    return explanation
 
+def assess_profile_recency(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Assess how current the candidate profile is."""
+    
+    years_stale = candidate.get("years_since_last_update", 0)
+    last_updated = candidate.get("last_updated", "")
+    
+    if years_stale >= 5:
+        return {
+            "severity": "high",
+            "warning": f"Profile not updated in {int(years_stale)} years",
+            "recommendation": "Contact candidate to verify current skills and experience before proceeding"
+        }
+    elif years_stale >= 3:
+        return {
+            "severity": "medium",
+            "warning": f"Profile {int(years_stale)} years old",
+            "recommendation": "Verify current tech stack during interview"
+        }
+    elif years_stale >= 1:
+        return {
+            "severity": "low",
+            "warning": f"Profile last updated {int(years_stale)} year(s) ago",
+            "recommendation": "Check for recent experience updates"
+        }
+    else:
+        return {
+            "severity": "none",
+            "warning": None,
+            "recommendation": None
+        }
+
+def assess_overqualification(
+    candidate: Dict[str, Any],
+    requirements: Dict[str, Any],
+    quick_match: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Check if candidate might be overqualified or profile is suspicious."""
+    
+    match_pct = quick_match["match_percentage"]
+    
+    if match_pct == 100:
+        # All skills match - could be legitimate or suspicious
+        suspicion_score = 0
+        notes = []
+        
+        # 1. Check if profile has generic descriptions
+        summary = candidate.get("semantic_summary", "").lower()
+        generic_phrases = [
+            "highly motivated", "team player", "fast learner",
+            "excellent communication", "detail oriented"
+        ]
+        generic_count = sum(1 for phrase in generic_phrases if phrase in summary)
+        
+        if generic_count >= 4:
+            suspicion_score += 2
+            notes.append("Profile contains many generic phrases")
+        
+        # 2. Check for unrealistic skill breadth
+        skills_str = candidate.get("skills_extracted", "")
+        total_skills = len([s.strip() for s in skills_str.split(",") if s.strip()])
+        
+        if total_skills > 30:
+            suspicion_score += 2
+            notes.append(f"Claims {total_skills} skills (unusually broad)")
+        
+        # 3. Check experience vs. skills ratio
+        exp_years = candidate.get("total_experience_years", 0)
+        if exp_years < 5 and total_skills > 15:
+            suspicion_score += 3
+            notes.append(f"Too many skills ({total_skills}) for experience level ({exp_years}y)")
+        
+        # 4. Check if all recent technologies
+        current_stack = candidate.get("current_tech_stack", "").lower()
+        recent_tech = ["react", "kubernetes", "docker", "aws", "microservices", "graphql"]
+        recent_count = sum(1 for tech in recent_tech if tech in current_stack)
+        
+        if recent_count >= 5 and exp_years < 3:
+            suspicion_score += 2
+            notes.append("Claims expertise in many recent technologies with limited experience")
+        
+        # Assess
+        if suspicion_score >= 5:
+            return {
+                "is_suspicious": True,
+                "suspicion_level": "high",
+                "notes": notes,
+                "recommendation": "Profile may be exaggerated. Conduct thorough technical screening."
+            }
+        elif suspicion_score >= 3:
+            return {
+                "is_suspicious": True,
+                "suspicion_level": "medium",
+                "notes": notes,
+                "recommendation": "Verify skills depth through technical assessment."
+            }
+    
+    return {
+        "is_suspicious": False,
+        "suspicion_level": "none",
+        "notes": [],
+        "recommendation": None
+    }
 
 def analyze_strengths(candidate, requirements, quick_match):
     """
@@ -227,18 +483,10 @@ def analyze_strengths(candidate, requirements, quick_match):
         strengths.append(f"Meets experience requirement ({int(candidate_exp)} years)")
     
     # 2. Skill depth (from top_5_skills_with_years)
-    top_skills = candidate.get("top_5_skills_with_years", "")
-    if top_skills:
-        skill_years = {}
-        for item in top_skills.split(","):
-            if ":" in item:
-                skill, years_str = item.strip().split(":")
-                try:
-                    skill_years[skill] = int(years_str)
-                except:
-                    pass
-        
-        # Find deep expertise in matched skills
+    top_skills_str = candidate.get("top_5_skills_with_years", "")
+    skill_years = parse_skills_with_years(top_skills_str)
+    
+    if skill_years:
         matched_lower = [s.lower() for s in quick_match.get("matched_skills", [])]
         for skill, years in skill_years.items():
             if any(skill.lower() in m or m in skill.lower() for m in matched_lower):
@@ -246,6 +494,11 @@ def analyze_strengths(candidate, requirements, quick_match):
                     strengths.append(f"Deep expertise: {skill} ({years} years)")
                 elif years >= 3:
                     strengths.append(f"Solid experience: {skill} ({years} years)")
+    else:
+        # Fallback: use total_experience_years
+        total_exp = candidate.get("total_experience_years", 0)
+        if total_exp > 0:
+            strengths.append(f"General experience: {int(total_exp)} years")
     
     # 3. Industry alignment
     required_industry = requirements.get("industry", "").lower()
@@ -423,33 +676,61 @@ def is_skill_trainable(skill, candidate):
     return "3-6 months"
 
 
-def generate_recommendation(candidate, requirements, quick_match, strengths, weaknesses):
-    """Generate hiring recommendation."""
+def generate_recommendation(
+    candidate: Dict[str, Any],
+    requirements: Dict[str, Any],
+    quick_match: Dict[str, Any],
+    strengths: List[str],
+    weaknesses: List[str]
+) -> str:
+    """Generate hiring recommendation with overqualification check."""
     
     fit_level = quick_match["fit_level"]
     match_pct = quick_match["match_percentage"]
+    candidate_name = candidate.get('name', 'This candidate')
     
+    # EXCELLENT FIT
     if fit_level == "excellent":
-        return f"""
-**HIGHLY RECOMMENDED - Move to Interview Immediately**
+        # Check for suspicious perfect matches
+        overqual = assess_overqualification(candidate, requirements, quick_match)
+        
+        if overqual["is_suspicious"]:
+            return f"""**RECOMMENDED WITH VERIFICATION**
 
-{candidate.get('name', 'This candidate')} is an excellent match for this role with {match_pct}% technical alignment. All critical requirements are met, and the candidate brings valuable experience.
+{candidate_name} shows perfect technical alignment ({match_pct}%).
+
+⚠️ **Profile Quality Alert:**
+{chr(10).join(f'- {note}' for note in overqual['notes'])}
+
+**Recommendation:** {overqual['recommendation']}
+
+**Next Steps:**
+1. Conduct thorough technical screening
+2. Ask for specific project examples
+3. Verify depth in claimed technologies
+4. Check references carefully
+
+**Risk Level:** MEDIUM - Profile may be overstated"""
+        
+        # Normal excellent fit
+        return f"""**HIGHLY RECOMMENDED - Move to Interview Immediately**
+
+{candidate_name} is an excellent match for this role with {match_pct}% technical alignment. All critical requirements are met, and the candidate brings valuable experience.
 
 **Next Steps:**
 1. Schedule initial phone screen within 24-48 hours
 2. Prepare technical assessment focused on {', '.join(quick_match.get('matched_skills', [])[:3])}
 3. Fast-track to final round if phone screen goes well
 
-**Risk Level:** LOW - Strong technical and cultural fit indicators
-"""
+**Risk Level:** LOW - Strong technical and cultural fit indicators"""
     
+    # GOOD FIT
     elif fit_level == "good":
         missing_count = len([w for w in weaknesses if "missing" in w.lower()])
         
-        return f"""
-**RECOMMENDED - Proceed with Interview**
+        return f"""**RECOMMENDED - Proceed with Interview**
 
-{candidate.get('name', 'This candidate')} is a strong match with {match_pct}% technical alignment. There are {missing_count} minor skill gap(s) that can be addressed.
+{candidate_name} is a strong match with {match_pct}% technical alignment. There are {missing_count} minor skill gap(s) that can be addressed.
 
 **Considerations:**
 - {weaknesses[0] if weaknesses else 'No major concerns'}
@@ -461,14 +742,13 @@ def generate_recommendation(candidate, requirements, quick_match, strengths, wea
 2. Assess learning ability and adaptability
 3. Discuss skill development plan during interview
 
-**Risk Level:** LOW-MEDIUM - Minor gaps manageable with training
-"""
+**Risk Level:** LOW-MEDIUM - Minor gaps manageable with training"""
     
+    # PARTIAL FIT
     elif fit_level == "partial":
-        return f"""
-**PROCEED WITH CAUTION - Conditional Recommendation**
+        return f"""**PROCEED WITH CAUTION - Conditional Recommendation**
 
-{candidate.get('name', 'This candidate')} shows {match_pct}% technical alignment with notable gaps. Consider only if:
+{candidate_name} shows {match_pct}% technical alignment with notable gaps. Consider only if:
 - Candidate demonstrates strong learning ability
 - You have training budget and timeline
 - Other stronger candidates are unavailable
@@ -481,14 +761,13 @@ def generate_recommendation(candidate, requirements, quick_match, strengths, wea
 2. Probe for quick learning examples
 3. Set clear 90-day performance milestones
 
-**Risk Level:** MEDIUM-HIGH - Significant gaps require investment
-"""
+**Risk Level:** MEDIUM-HIGH - Significant gaps require investment"""
     
-    else:  # poor or not_fit
-        return f"""
-**NOT RECOMMENDED - Do Not Proceed**
+    # POOR OR NOT FIT
+    else:
+        return f"""**NOT RECOMMENDED - Do Not Proceed**
 
-{candidate.get('name', 'This candidate')} shows only {match_pct}% technical alignment. The skill gaps are too significant for this role.
+{candidate_name} shows only {match_pct}% technical alignment. The skill gaps are too significant for this role.
 
 **Why Not:**
 {chr(10).join(f'- {w}' for w in weaknesses[:4])}
@@ -496,8 +775,8 @@ def generate_recommendation(candidate, requirements, quick_match, strengths, wea
 **Better Approach:**
 Continue searching for candidates with stronger alignment to core requirements: {', '.join(requirements.get('must_have_skills', [])[:3])}
 
-**Risk Level:** HIGH - Low probability of success
-"""
+**Risk Level:** HIGH - Low probability of success"""
+
 
 
 def estimate_onboarding(candidate, requirements, quick_match):
@@ -540,9 +819,97 @@ def estimate_onboarding(candidate, requirements, quick_match):
             "risk_level": "HIGH",
             "notes": "Extensive training required, high risk of underperformance"
         }
+def validate_candidate_data(candidate: Dict[str, Any]) -> Tuple[bool, List[str], List[str]]:
+    """
+    Validate that candidate has minimum required data for analysis.
+    
+    Returns:
+        (is_valid, list_of_missing_critical_fields, list_of_warnings)
+    """
+    
+    missing_fields = []
+    warnings = []
+    
+    # Critical fields (analysis can't proceed without these)
+    critical_fields = {
+        "candidate_id": "Candidate ID",
+        "name": "Candidate name",
+    }
+    
+    for field, display_name in critical_fields.items():
+        if not candidate.get(field):
+            missing_fields.append(display_name)
+    
+    # Important fields (analysis can proceed but with warnings)
+    important_fields = {
+        "skills_extracted": "Skills",
+        "total_experience_years": "Experience",
+        "semantic_summary": "Profile summary",
+    }
+    
+    for field, display_name in important_fields.items():
+        value = candidate.get(field)
+        if not value or (isinstance(value, str) and len(value.strip()) < 5):
+            warnings.append(f"Missing or limited {display_name}")
+    
+    return (len(missing_fields) == 0, missing_fields, warnings)
 
+def parse_skills_with_years(skills_str: str) -> Dict[str, int]:
+    """
+    Safely parse top_5_skills_with_years field.
+    
+    Handles formats:
+    - "Python:7, AWS:5, Java:10"
+    - "Python: 7, AWS: 5"
+    - "Python - 7 years, AWS - 5 years"
+    - Malformed data
+    
+    Returns:
+        Dict of {skill: years}
+    """
+    if not skills_str or not isinstance(skills_str, str):
+        return {}
+    
+    skill_years = {}
+    
+    # Try comma-separated format first
+    items = skills_str.split(',')
+    
+    for item in items:
+        item = item.strip()
+        
+        # Try colon separator
+        if ':' in item:
+            parts = item.split(':', 1)
+        # Try dash separator
+        elif '-' in item:
+            parts = item.split('-', 1)
+        else:
+            continue
+        
+        if len(parts) != 2:
+            continue
+        
+        skill = parts[0].strip()
+        years_str = parts[1].strip()
+        
+        # Extract number from years string
+        # Handles: "7", "7 years", "7y", etc.
+        import re
+        match = re.search(r'(\d+)', years_str)
+        
+        if match:
+            try:
+                years = int(match.group(1))
+                if 0 <= years <= 50:  # Sanity check
+                    skill_years[skill] = years
+            except (ValueError, AttributeError):
+                logger.warning(f"Could not parse years from: {years_str}")
+                continue
+    
+    return skill_years
 
-def generate_fit_explanation(candidate, requirements, quick_match, strengths, weaknesses):
+def erp_count(candidate, requirements, quick_match, strengths, weaknesses):
     """Generate narrative explanation of fit."""
     
     fit_level = quick_match["fit_level"]
@@ -576,5 +943,17 @@ def generate_fit_explanation(candidate, requirements, quick_match, strengths, we
         closing = f"\n\n**Overall Assessment:** {name} has the core skills and experience needed for success in this role. {' Minor gaps can be addressed through training.' if weaknesses else ''}"
     else:
         closing = f"\n\n**Overall Assessment:** The skill gaps are significant and would require substantial investment in training and development."
+    explanation = opening + strength_summary + weakness_summary + closing
     
-    return opening + strength_summary + weakness_summary + closing
+    # Limit length (frontend can handle ~5000 chars comfortably)
+    MAX_LENGTH = 4000
+    
+    if len(explanation) > MAX_LENGTH:
+        explanation = explanation[:MAX_LENGTH]
+        # Find last complete sentence
+        last_period = explanation.rfind('.')
+        if last_period > MAX_LENGTH - 200:
+            explanation = explanation[:last_period + 1]
+        explanation += "\n\n[Analysis truncated for brevity]"
+    
+    return explanation

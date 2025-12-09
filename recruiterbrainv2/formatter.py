@@ -107,6 +107,13 @@ def format_for_insight(results: Dict[str, Any]) -> Dict[str, Any]:
             "candidate_id": cand.get("candidate_id"),
             "position": f"{career_stage} · {industries}",
             "match_chip": f"{len(match.get('matched_skills', []))}/{match.get('total_required', 0)} skills ({match.get('match_percentage', 0)}%)",
+            
+            
+            "fit_level": match.get("fit_level", "unknown"), 
+            "fit_badge": match.get("fit_badge", "—"),  
+            "quick_reason": match.get("quick_reason", ""),  
+            "has_critical_mismatch": match.get("critical_mismatch") is not None, 
+            
             "matched": match.get("matched_skills", []),
             "missing": match.get("missing_skills", []),
             "why": cand.get("summary", "")[:150],
@@ -124,6 +131,7 @@ def format_for_insight(results: Dict[str, Any]) -> Dict[str, Any]:
         "total_matched": results.get("total_found", 0),
         "scarcity_message": _generate_scarcity_message(results),
         "data_quality_banner": None,
+        "original_query": results.get("original_query", ""),  
     }
 
 
