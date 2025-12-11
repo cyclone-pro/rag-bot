@@ -10,7 +10,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 import base64
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -21,9 +21,11 @@ from fastapi import BackgroundTasks
 from fastapi import Response
 import zipfile
 import io
-
+import json
+import logging
+from openai import AsyncOpenAI, OpenAI
 from pymilvus import client
-
+from urllib3 import request
 from recruiterbrainv2.config import COLLECTION, ENABLE_CACHE, SEARCH_OUTPUT_FIELDS, get_milvus_client
 from .jobs import get_job_store, JobStatus
 from .workers import process_resume_upload
@@ -60,6 +62,7 @@ logging.getLogger('pymilvus').setLevel(logging.WARNING)
 logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ==================== FASTAPI APP ====================
 app = FastAPI(title="RecruiterBrain v2", version="2.0.0")
@@ -275,7 +278,9 @@ class JobStatusResponse(BaseModel):
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
-
+class CompareRequest(BaseModel):
+    candidates: List[Dict[str, Any]]
+    job_requirements: str
 # ==================== ROUTES ====================
 
 @app.get("/", response_class=HTMLResponse)
@@ -1064,6 +1069,91 @@ async def analyze_candidate_fit_endpoint(
             status_code=500,
             detail=f"Fit analysis failed: {str(e)}"
         )
+@app.post('/compare_candidates')
+def compare_candidates(req: CompareRequest):  # ← Use Pydantic model
+    """Phase 3: Multi-candidate comparison endpoint."""
+    try:
+        candidates = req.candidates
+        job_requirements = req.job_requirements
+        
+        if len(candidates) < 2:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Need at least 2 candidates to compare"}
+            )
+        
+        # Build comparison prompt
+        candidates_text = "\n\n".join([
+            f"CANDIDATE {i+1}: {c.get('candidate', 'Unknown')}\n"
+            f"Position: {c.get('position', 'Unknown')}\n"
+            f"Match: {c.get('match_chip', 'N/A')}\n"
+            f"Skills: Has {', '.join(c.get('matched', [])[:5])} | Missing {', '.join(c.get('missing', [])[:3])}\n"
+            f"Notes: {c.get('notes', '')}"
+            for i, c in enumerate(candidates)
+        ])
+        
+        prompt = f"""You are a hiring consultant. Compare these candidates for this role:
+
+JOB REQUIREMENTS: {job_requirements}
+
+{candidates_text}
+
+Provide a structured comparison in this EXACT JSON format:
+{{
+  "candidates": [
+    {{
+      "name": "Candidate Name",
+      "position": "Their position",
+      "match_percentage": 85,
+      "fit_badge": "🟢 Strong Fit",
+      "matched": ["skill1", "skill2"],
+      "missing": ["skill3"],
+      "strengths": ["strength 1", "strength 2", "strength 3"],
+      "gaps": ["gap 1", "gap 2"],
+      "key_differentiator": "What makes this candidate unique",
+      "is_top_choice": true
+    }}
+  ],
+  "recommendation": {{
+    "top_choice": "Name of best candidate",
+    "reasoning": "Why they're the best fit (2-3 sentences)",
+    "runner_up": "Name of second best",
+    "tradeoffs": "Key tradeoffs to consider"
+  }}
+}}
+
+Rules:
+- Mark ONLY ONE candidate as "is_top_choice": true
+- Strengths: 3-4 specific advantages
+- Gaps: 1-3 specific concerns
+- Be honest about tradeoffs
+- Focus on job fit, not just credentials"""
+
+        # Call OpenAI
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+        
+        content = response.choices[0].message.content.strip()
+        
+        # Parse JSON response
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.endswith("```"):
+            content = content[:-3]
+        
+        comparison = json.loads(content.strip())
+        return comparison
+        
+    except Exception as e:
+        logger.error(f"Comparison error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
 # ==================== HEALTH CHECK ====================
 
 @app.get("/health")

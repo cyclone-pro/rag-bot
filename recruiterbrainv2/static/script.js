@@ -32,7 +32,8 @@ const uploadResumeBtn = document.getElementById("upload-resume-btn");
 const uploadStatus = document.getElementById("upload-status");
 let currentQuery = '';
 let modalRequestInProgress = false;
-
+let selectedCandidates = new Set();
+let currentCandidatesData = [];
 // Voice elements
 const micButton = document.getElementById("mic-button");
 const micIcon = document.getElementById("mic-icon");
@@ -51,6 +52,8 @@ contactToggle.addEventListener("click", () => {
 
 closeInsightBtn.addEventListener("click", () => {
   insightTable.classList.remove("visible");
+  selectedCandidates.clear();
+  currentCandidatesData = [];
 });
 
 // ==================== VOICE UI HELPERS ====================
@@ -115,7 +118,7 @@ function updateStats(results) {
 }
 
 // ==================== RENDER INSIGHT TABLE ====================
-function renderInsight(results) {
+/* function renderInsight(results) {
   insightRows.innerHTML = "";
   const candidates = results.candidates || [];
 
@@ -196,7 +199,134 @@ function renderInsight(results) {
 
   insightTable.classList.add("visible");
 }
+*/
+function renderInsight(results) {
+  insightRows.innerHTML = "";
+  const candidates = results.candidates || [];
 
+  if (candidates.length === 0) {
+    insightRows.innerHTML =
+      '<div class="insight-row" style="text-align: center; color: var(--text-muted)">No candidates found</div>';
+    insightTable.classList.add("visible");
+    return;
+  }
+
+  // PHASE 3: Store data for comparison
+  currentCandidatesData = candidates.map(cand => ({
+    candidate_id: cand.candidate_id,
+    candidate: cand.name,
+    position: `${cand.career_stage} · ${cand.primary_industry}`,
+    match_chip: `${cand.match.match_percentage}% match`,
+    matched: cand.match.matched_skills || [],
+    missing: cand.match.missing_skills || [],
+    notes: cand.summary || ""
+  }));
+
+  candidates.forEach((cand, idx) => {
+    const match = cand.match || {};
+    const matchPct = match.match_percentage || 0;
+
+    let badgeClass = "partial";
+    if (matchPct >= 80) badgeClass = "";
+    else if (matchPct >= 60) badgeClass = "good";
+
+    const row = document.createElement("div");
+    row.className = "insight-row";
+
+    const location =
+      [cand.location_city, cand.location_state, cand.location_country]
+        .filter(Boolean)
+        .join(", ") || "Unknown";
+
+    row.innerHTML = `
+      <div class="candidate-header">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <input 
+            type="checkbox" 
+            class="select-checkbox" 
+            data-candidate-id="${cand.candidate_id}"
+            ${selectedCandidates.has(cand.candidate_id) ? "checked" : ""}
+          />
+          <div>
+            <div class="candidate-name">${idx + 1}. ${cand.name || "Unknown"}</div>
+            <div class="candidate-details">
+              <span>📍 ${location}</span>
+              <span>💼 ${cand.career_stage || "Unknown"}</span>
+              <span>🏢 ${cand.primary_industry || "Unknown"}</span>
+              <span>📅 ${cand.total_experience_years || 0} years</span>
+            </div>
+          </div>
+        </div>
+        <div class="match-badge ${badgeClass}">${matchPct}% Match</div>
+      </div>
+
+      ${
+        cand.summary
+          ? `<div style="margin-bottom: 0.75rem; color: var(--text-muted); font-size: 0.9rem">${cand.summary}</div>`
+          : ""
+      }
+
+      <div>
+        <strong style="font-size: 0.9rem">Skills:</strong>
+        <div class="skill-list">
+          ${(match.matched_skills || [])
+            .map((s) => `<span class="skill-tag matched">✓ ${s}</span>`)
+            .join("")}
+          ${(match.missing_skills || [])
+            .map((s) => `<span class="skill-tag missing">✗ ${s}</span>`)
+            .join("")}
+        </div>
+      </div>
+
+      ${
+        state.showContacts && (cand.email || cand.phone || cand.linkedin_url)
+          ? `
+        <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 0.875rem; color: var(--text-muted)">
+          ${cand.email ? `<div>📧 ${cand.email}</div>` : ""}
+          ${cand.phone ? `<div>📞 ${cand.phone}</div>` : ""}
+          ${
+            cand.linkedin_url
+              ? `<div>🔗 <a href="${cand.linkedin_url}" target="_blank" style="color: var(--accent)">${cand.linkedin_url}</a></div>`
+              : ""
+          }
+        </div>
+      `
+          : ""
+      }
+    `;
+
+    insightRows.appendChild(row);
+  });
+
+  // PHASE 3: Add event listeners for checkboxes
+  document.querySelectorAll(".select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("change", (e) => {
+      e.stopPropagation();
+      toggleCandidateSelection(checkbox.dataset.candidateId);
+    });
+  });
+
+  // PHASE 3: Add compare button to insight header if not exists
+  const insightHeader = document.querySelector(".insight-header");
+  if (insightHeader && !document.getElementById("compare-selected-btn")) {
+    const compareBtn = document.createElement("button");
+    compareBtn.id = "compare-selected-btn";
+    compareBtn.className = "compare-button";
+    compareBtn.textContent = "Compare (0)";
+    compareBtn.disabled = true;
+    compareBtn.onclick = compareSelectedCandidates;
+    
+    // Insert after the title
+    const insightTitle = insightHeader.querySelector(".insight-title");
+    if (insightTitle) {
+      insightTitle.after(compareBtn);
+    } else {
+      insightHeader.appendChild(compareBtn);
+    }
+  }
+
+  insightTable.classList.add("visible");
+}
 async function runInsightSearch() {
     const question = document.getElementById('question').value.trim();
     
@@ -653,6 +783,9 @@ function scheduleInterview(candidateId) {
 async function search() {
   const question = questionInput.value.trim();
   if (!question) return;
+  selectedCandidates.clear();
+  currentCandidatesData = [];
+  currentQuery = question; 
 
   questionInput.value = "";
   addMessage(question, "user");
@@ -1157,7 +1290,172 @@ function stopRecording() {
     state.mediaRecorder.stop();
   }
 }
+// ============================================
+// PHASE 3: MULTI-CANDIDATE COMPARISON
+// ============================================
 
+function toggleCandidateSelection(candidateId) {
+  if (selectedCandidates.has(candidateId)) {
+    selectedCandidates.delete(candidateId);
+  } else {
+    if (selectedCandidates.size >= 4) {
+      alert("You can compare up to 4 candidates at a time");
+      return;
+    }
+    selectedCandidates.add(candidateId);
+  }
+  updateCompareButton();
+  updateCheckboxes();
+}
+
+function updateCompareButton() {
+  const compareBtn = document.getElementById("compare-selected-btn");
+  if (compareBtn) {
+    compareBtn.disabled = selectedCandidates.size < 2;
+    compareBtn.textContent = `Compare (${selectedCandidates.size})`;
+  }
+}
+
+function updateCheckboxes() {
+  document.querySelectorAll(".select-checkbox").forEach((checkbox) => {
+    const candidateId = checkbox.dataset.candidateId;
+    checkbox.checked = selectedCandidates.has(candidateId);
+  });
+}
+
+async function compareSelectedCandidates() {
+  console.log('🔍 Starting comparison...');
+  console.log('Selected candidates:', selectedCandidates);
+  if (selectedCandidates.size < 2) {
+    alert("Please select at least 2 candidates to compare");
+    return;
+  }
+
+  const selectedData = currentCandidatesData.filter((c) =>
+    selectedCandidates.has(c.candidate_id)
+  );
+  console.log('📦 Sending data:', { candidates: selectedData, job_requirements: currentQuery });
+
+
+  try {
+    const response = await fetch("/compare_candidates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        candidates: selectedData,
+        job_requirements: currentQuery || questionInput.value || "" // ← FIXED THIS LINE
+      }),
+    });
+    console.log('📡 Response status:', response.status);
+
+    if (!response.ok) throw new Error("Comparison failed");
+
+    const comparison = await response.json();
+    displayComparison(comparison);
+  } catch (error) {
+    console.error("Comparison error:", error);
+    alert("Failed to generate comparison. Please try again.");
+  }
+}
+
+function displayComparison(comparison) {
+  const modal = document.getElementById("comparison-modal");
+  const content = document.getElementById("comparison-content");
+
+  let html = `
+    <table class="comparison-table">
+      <thead>
+        <tr>
+          <th>Category</th>
+          ${comparison.candidates
+            .map(
+              (c) => `
+            <th>
+              <div class="comparison-name">${c.name}</div>
+              <div class="comparison-position">${c.position}</div>
+            </th>
+          `
+            )
+            .join("")}
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Overall Fit</td>
+          ${comparison.candidates
+            .map(
+              (c) => `
+            <td>
+              <strong>${c.match_percentage}%</strong> 
+              ${c.is_top_choice ? '<span class="winner-indicator">🏆 Top Choice</span>' : ""}
+              <div style="margin-top: 0.5rem">${c.fit_badge}</div>
+            </td>
+          `
+            )
+            .join("")}
+        </tr>
+        
+        <tr>
+          <td>Skills Match</td>
+          ${comparison.candidates
+            .map(
+              (c) => `
+            <td>
+              <div><strong>✓ Has:</strong></div>
+              ${c.matched.map((s) => `<span class="skill-tag">${s}</span>`).join("")}
+              ${
+                c.missing.length > 0
+                  ? `
+                <div style="margin-top: 0.5rem"><strong>✗ Missing:</strong></div>
+                ${c.missing.map((s) => `<span class="skill-tag missing">${s}</span>`).join("")}
+              `
+                  : ""
+              }
+            </td>
+          `
+            )
+            .join("")}
+        </tr>
+        
+        <tr>
+          <td>Strengths vs Gaps</td>
+          ${comparison.candidates
+            .map(
+              (c) => `
+            <td>
+              <div class="pros-cons">
+                ${c.strengths.map((s) => `<div class="pro">${s}</div>`).join("")}
+                ${c.gaps.map((g) => `<div class="con">${g}</div>`).join("")}
+              </div>
+            </td>
+          `
+            )
+            .join("")}
+        </tr>
+        
+        <tr>
+          <td>Key Differentiator</td>
+          ${comparison.candidates.map((c) => `<td>${c.key_differentiator}</td>`).join("")}
+        </tr>
+      </tbody>
+    </table>
+    
+    <div class="recommendation-box">
+      <h3>💡 Hiring Recommendation</h3>
+      <p><strong>Top Choice:</strong> ${comparison.recommendation.top_choice}</p>
+      <p><strong>Why:</strong> ${comparison.recommendation.reasoning}</p>
+      <p><strong>Next Best:</strong> ${comparison.recommendation.runner_up}</p>
+      <p><strong>Trade-offs:</strong> ${comparison.recommendation.tradeoffs}</p>
+    </div>
+  `;
+
+  content.innerHTML = html;
+  modal.classList.add("active");
+}
+
+document.getElementById("close-comparison")?.addEventListener("click", () => {
+  document.getElementById("comparison-modal").classList.remove("active");
+});
 // Transcribe audio via Whisper API
 async function transcribeWithWhisper(audioBlob) {
   micButton.classList.add("processing");
