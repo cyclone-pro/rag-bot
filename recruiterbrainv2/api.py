@@ -1,4 +1,4 @@
-"""FastAPI surface for RecruiterBrain v2."""
+"""FastAPI surface for RecruiterBrain v2 - WITH FRESHNESS FILTERING."""
 from __future__ import annotations
 
 import logging
@@ -53,6 +53,13 @@ class SearchRequest(BaseModel):
     titles_any: Optional[List[str]] = None
     domains_any: Optional[List[str]] = None
     clouds_any: Optional[List[str]] = None
+    
+    # 🔥 NEW: Freshness parameter
+    freshness_days: Optional[int] = Field(
+        60,  # Default from config.DEFAULT_FRESHNESS_DAYS
+        description="Days to look back (7/30/90/180/365 or null for all time)",
+        ge=0
+    )
 
 
 class CandidateHit(BaseModel):
@@ -135,6 +142,8 @@ def search(req: SearchRequest, cols: Tuple[Collection, Collection] = Depends(col
     jd = rbv2.parse_jd(req.query)
 
     expr = _build_expr_from_jd(jd)
+    
+    # 🔥 CALL UNIFIED_SEARCH WITH FRESHNESS
     rows = rbv2.unified_search(
         cand_col,
         jd_text=jd.get("raw"),
@@ -145,6 +154,7 @@ def search(req: SearchRequest, cols: Tuple[Collection, Collection] = Depends(col
         domains_any=req.domains_any,
         clouds_any=req.clouds_any or [c.lower() for c in jd.get("clouds", [])],
         top_k=req.top_k,
+        freshness_days=req.freshness_days,  # 🔥 PASS FRESHNESS
     )
     chosen = rows[: req.top_k]
 
@@ -185,3 +195,11 @@ def read_memory(client_id: str, cols: Tuple[Collection, Collection] = Depends(co
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"Memory not found for {client_id}") from exc
     return {"client_id": client_id, "memory_snippet": snippet, "raw": row}
+
+
+# 🔥 NEW ENDPOINT: Get freshness presets
+@app.get("/freshness-presets", tags=["config"])
+def get_freshness_presets():
+    """Get available freshness filter presets for UI."""
+    from .config import FRESHNESS_PRESETS
+    return {"presets": FRESHNESS_PRESETS}

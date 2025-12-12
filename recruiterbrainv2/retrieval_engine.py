@@ -1,8 +1,10 @@
-"""Core hybrid retrieval engine - WITH PARALLEL SEARCH."""
+"""Core hybrid retrieval engine - WITH PARALLEL SEARCH AND FRESHNESS FILTERING."""
 import logging
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta
 
 from .config import (
     get_milvus_client,
@@ -21,12 +23,60 @@ from .config import (
     ENABLE_CACHE,
     SEARCH_CACHE_TTL,
     ENABLE_PARALLEL_SEARCH,
+    DEFAULT_FRESHNESS_DAYS,  # 🔥 NEW
 )
 from .skill_extractor import extract_requirements
 from .ranker import hybrid_rank, compute_match_details
 from .cache import generate_cache_key, get_cache
 
 logger = logging.getLogger(__name__)
+
+
+# 🔥 NEW: Freshness helper functions
+def calculate_days_old(last_updated_str: str) -> int:
+    """Calculate how many days old a timestamp is."""
+    if not last_updated_str:
+        return 9999
+    try:
+        # Handle format: "2025-12-07T20:35:20."
+        last_updated_str = last_updated_str.rstrip('.')
+        dt = datetime.fromisoformat(last_updated_str.replace('Z', '+00:00'))
+        if dt.tzinfo:
+            days = (datetime.now(dt.tzinfo) - dt).days
+        else:
+            days = (datetime.now() - dt).days
+        return max(0, days)
+    except Exception as e:
+        logger.warning(f"Invalid timestamp: {last_updated_str} - {e}")
+        return 9999
+
+
+def get_freshness_badge(days_old: int) -> dict:
+    """Get freshness badge info."""
+    if days_old <= 7:
+        return {"emoji": "🟢", "label": "FRESH", "priority": 1, "color": "#10b981"}
+    elif days_old <= 30:
+        return {"emoji": "🟢", "label": "RECENT", "priority": 2, "color": "#10b981"}
+    elif days_old <= 90:
+        return {"emoji": "🟡", "label": "GOOD", "priority": 3, "color": "#f59e0b"}
+    elif days_old <= 180:
+        return {"emoji": "🟠", "label": "VERIFY", "priority": 4, "color": "#f97316"}
+    elif days_old <= 365:
+        return {"emoji": "🔴", "label": "STALE", "priority": 5, "color": "#ef4444"}
+    else:
+        return {"emoji": "🔴", "label": "VERY STALE", "priority": 6, "color": "#dc2626"}
+
+
+def build_date_filter(freshness_days: Optional[int]) -> Optional[str]:
+    """Build Milvus date filter expression."""
+    if freshness_days is None:
+        return None
+    
+    cutoff = datetime.now() - timedelta(days=freshness_days)
+    cutoff_iso = cutoff.isoformat()
+    
+    # Milvus filter format
+    return f'last_updated >= "{cutoff_iso}"'
 
 
 def _vectorize(text: str, batch_texts: Optional[List[str]] = None) -> Optional[List[float]]:
@@ -61,14 +111,27 @@ def search_candidates_v2(
     top_k: int = 10,
     career_stage: Optional[str] = None,
     industry: Optional[str] = None,
+    freshness_days: Optional[int] = DEFAULT_FRESHNESS_DAYS, 
 ) -> Dict[str, Any]:
     """
-    Main search function WITH CACHING AND PARALLEL SEARCH.
+    Main search function WITH CACHING, PARALLEL SEARCH, AND FRESHNESS FILTERING.
+    
+    Args:
+        query: Search query
+        top_k: Number of results to return
+        career_stage: Filter by career stage
+        industry: Filter by industry
+        freshness_days: Days to look back (None = all time) 🔥 NEW
     
     Parallel Search:
     - Vector and keyword searches run simultaneously
     - 50% faster than sequential execution
     - Thread-safe Milvus operations
+    
+    Freshness Filtering:
+    - Filters candidates by last_updated date BEFORE search
+    - Milvus-native filtering (fast, no data transfer overhead)
+    - Adds freshness badges to results
     """
     # ==================== CACHE CHECK ====================
     if ENABLE_CACHE:
@@ -77,7 +140,8 @@ def search_candidates_v2(
             query=query,
             top_k=top_k,
             career_stage=career_stage or "",
-            industry=industry or ""
+            industry=industry or "",
+            freshness_days=freshness_days or "all"  # 🔥 Include in cache key
         )
         
         cache = get_cache()
@@ -149,20 +213,21 @@ def search_candidates_v2(
     if vector is None:
         raise RuntimeError("Embedding model unavailable")
     
-    # ==================== BUILD FILTER ====================
-    filter_expr = _build_filter(career_stage, industry)
+    # ==================== BUILD FILTER (WITH FRESHNESS) ====================
+    filter_expr = _build_filter(career_stage, industry, freshness_days)  # 🔥 Pass freshness
     
     # ==================== DECIDE SEARCH MODE ====================
     use_hybrid = len(required_skills) >= 5 or requirements.get("role_type")
     
     if use_hybrid:
-        logger.info("Using HYBRID mode (%d skills, parallel=%s)", 
+        logger.info("Using HYBRID mode (%d skills, parallel=%s, freshness=%s days)", 
                    len(required_skills), 
-                   ENABLE_PARALLEL_SEARCH)
+                   ENABLE_PARALLEL_SEARCH,
+                   freshness_days or "all")  # 🔥 Log freshness
         results = _hybrid_search_parallel(query, required_skills, filter_expr, vector)
         search_mode = "hybrid_parallel" if ENABLE_PARALLEL_SEARCH else "hybrid"
     else:
-        logger.info("Using VECTOR-ONLY mode")
+        logger.info("Using VECTOR-ONLY mode (freshness=%s days)", freshness_days or "all")  # 🔥 Log freshness
         results = _vector_search(query, filter_expr, vector, VECTOR_TOP_K)
         search_mode = "vector_only"
     
@@ -186,7 +251,7 @@ def search_candidates_v2(
         KEYWORD_WEIGHT,
     )
     
-    # ==================== FORMAT TOP RESULTS ====================
+    # ==================== FORMAT TOP RESULTS (WITH FRESHNESS) ====================
     top_candidates = []
     for candidate, score in ranked[:top_k]:
         match_details = compute_match_details(candidate, required_skills)
@@ -197,6 +262,11 @@ def search_candidates_v2(
             candidate.get("location_country")
         ]
         location = ", ".join([p for p in location_parts if p])
+        
+        # 🔥 ADD FRESHNESS INFO
+        last_updated = candidate.get('last_updated', '')
+        days_old = calculate_days_old(last_updated)
+        freshness_badge = get_freshness_badge(days_old)
         
         top_candidates.append({
             "candidate_id": candidate.get("candidate_id"),
@@ -221,6 +291,12 @@ def search_candidates_v2(
             "current_tech_stack": candidate.get("current_tech_stack", ""),
             "role_type": candidate.get("role_type", ""),
             "summary": (candidate.get("semantic_summary", "") or "")[:300],
+            
+            # 🔥 FRESHNESS FIELDS
+            "last_updated": last_updated,
+            "days_old": days_old,
+            "freshness_badge": freshness_badge,
+            "needs_verification": days_old > 90,
         })
     
     final_result = {
@@ -229,7 +305,8 @@ def search_candidates_v2(
         "requirements": requirements,
         "search_mode": search_mode,
         "query": query,
-        "original_query": query
+        "original_query": query,
+        "freshness_filter": freshness_days,  # 🔥 Include in response
     }
     
     # ==================== CACHE RESULT ====================
@@ -247,23 +324,21 @@ def _hybrid_search_parallel(
     vector: List[float],
 ) -> List[Dict[str, Any]]:
     """
-    Parallel hybrid search: keyword + vector run simultaneously.
+    Parallel hybrid search for maximum speed.
     
-    Uses ThreadPoolExecutor to run both searches in parallel.
-    50% faster than sequential execution.
+    Runs keyword and vector searches simultaneously.
     """
-    import time
-    
     if not ENABLE_PARALLEL_SEARCH:
-        # Fallback to sequential
         return _hybrid_search_sequential(query, required_skills, filter_expr, vector)
+    
+    import time
     
     start = time.time()
     
     # Get thread pool
     executor = get_search_thread_pool()
     
-    # Submit both searches to thread pool
+    # Submit both searches in parallel
     keyword_future = executor.submit(
         _keyword_search,
         required_skills,
@@ -292,10 +367,7 @@ def _hybrid_search_parallel(
     # Merge results
     keyword_ids = {c["candidate_id"] for c in keyword_candidates}
     merged = list(keyword_candidates)
-    logger.info(f"⚡ Parallel search completed in {elapsed:.2f}s")
-    logger.info(f"   Keyword: {len(keyword_candidates)} candidates")
-    logger.info(f"   Vector: {len(vector_candidates)} candidates")
-    logger.info(f"   Speedup: ~{1.0/elapsed * 2:.1f}x (compared to sequential ~1.0s)")
+    
     for vc in vector_candidates:
         if vc["candidate_id"] not in keyword_ids:
             merged.append(vc)
@@ -352,6 +424,7 @@ def _keyword_search(
     Keyword-based search using Milvus scalar filters.
     
     Thread-safe for parallel execution.
+    Filter includes freshness if specified.
     """
     if not skills:
         return []
@@ -372,6 +445,7 @@ def _keyword_search(
     
     keyword_expr = " or ".join(skill_conditions)
     
+    # 🔥 Combine with filter (which includes freshness)
     if filter_expr:
         keyword_expr = f"({filter_expr}) and ({keyword_expr})"
     
@@ -417,6 +491,7 @@ def _vector_search(
     Pure vector search using ANN.
     
     Thread-safe for parallel execution.
+    Filter includes freshness if specified.
     """
     # Each thread gets its own Milvus client (thread-safe)
     client_or_pool = get_milvus_client()
@@ -434,6 +509,7 @@ def _vector_search(
         "output_fields": SEARCH_OUTPUT_FIELDS,
     }
     
+    # 🔥 Add filter (includes freshness)
     if filter_expr:
         search_params["filter"] = filter_expr
     
@@ -475,9 +551,20 @@ def _vector_search(
 def _build_filter(
     career_stage: Optional[str],
     industry: Optional[str],
+    freshness_days: Optional[int] = None,  # 🔥 NEW PARAMETER
 ) -> Optional[str]:
-    """Build Milvus filter expression."""
+    """
+    Build Milvus filter expression.
+    
+    Now includes freshness filtering based on last_updated field.
+    """
     filters = []
+    
+    # 🔥 FRESHNESS FILTER (FIRST)
+    date_filter = build_date_filter(freshness_days)
+    if date_filter:
+        filters.append(date_filter)
+        logger.debug(f"Freshness filter: last {freshness_days} days")
     
     # Career stage filter
     if career_stage and career_stage != "Any":

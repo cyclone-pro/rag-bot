@@ -151,6 +151,26 @@
             <label for="top-k">Results Count</label>
             <input type="number" id="top-k" value="10" min="1" max="50" />
           </div>
+
+          <!-- 🔥 NEW: Freshness Filter -->
+          <div class="filter-group">
+            <label for="freshness-days">
+              🕐 Data Freshness
+              <span style="font-size: 0.8em; color: #64748b; cursor: help;" title="How recent should candidate data be?">ℹ️</span>
+            </label>
+            <select id="freshness-days">
+              <option value="7">Last 7 days 🟢</option>
+              <option value="30">Last 30 days 🟢</option>
+              <option value="60" selected>Last 60 days (Default) 🟡</option>
+              <option value="90">Last 3 months 🟡</option>
+              <option value="180">Last 6 months 🟠</option>
+              <option value="365">Last year 🔴</option>
+              <option value="all">All time ⚪</option>
+            </select>
+            <small style="display: block; margin-top: 4px; color: #64748b; font-style: italic; font-size: 0.75rem;">
+              Fresher data = higher chance of availability
+            </small>
+          </div>
         </div>
       </div>
 

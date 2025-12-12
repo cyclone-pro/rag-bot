@@ -20,6 +20,7 @@ const contactToggle = document.getElementById("contact-toggle");
 const careerStageSelect = document.getElementById("career-stage");
 const industrySelect = document.getElementById("industry");
 const topKInput = document.getElementById("top-k");
+const freshnessSelect = document.getElementById("freshness-days"); // 🔥 NEW
 const statsBar = document.getElementById("stats-bar");
 const statTotal = document.getElementById("stat-total");
 const statMode = document.getElementById("stat-mode");
@@ -97,6 +98,15 @@ function getFilters() {
   const industry = industrySelect.value;
   if (industry) filters.industry = industry;
 
+
+  // 🔥 NEW: Add freshness filter
+  const freshnessValue = freshnessSelect.value;
+  if (freshnessValue === "all") {
+    filters.freshness_days = null;
+  } else {
+    filters.freshness_days = parseInt(freshnessValue);
+  }
+
   return filters;
 }
 
@@ -104,7 +114,12 @@ function getFilters() {
 function updateStats(results) {
   statsBar.classList.add("visible");
   statTotal.textContent = results.total_found || 0;
-  statMode.textContent = results.search_mode || "vector";
+  // 🔥 UPDATE: Show freshness in search mode
+  let modeText = results.search_mode || "vector";
+  if (results.freshness_filter) {
+    modeText += ` (${ results.freshness_filter}d)`;
+  }
+  statMode.textContent = modeText;
 
   const candidates = results.candidates || [];
   if (candidates.length > 0) {
@@ -116,6 +131,24 @@ function updateStats(results) {
     statAvg.textContent = "0%";
   }
 }
+
+// 🔥 NEW: Format relative date
+function formatRelativeDate(daysOld) {
+  if (daysOld === 0) return "Today";
+  if (daysOld === 1) return "Yesterday";
+  if (daysOld < 7) return `${daysOld} days ago`;
+  if (daysOld < 30) {
+    const weeks = Math.floor(daysOld / 7);
+    return `${weeks} week${weeks > 1 ? 's' : ''} ago`;
+  }
+  if (daysOld < 365) {
+    const months = Math.floor(daysOld / 30);
+    return `${months} month${months > 1 ? 's' : ''} ago`;
+  }
+  const years = Math.floor(daysOld / 365);
+  return `${years} year${years > 1 ? 's' : ''} ago`;
+}
+
 
 // ==================== RENDER INSIGHT TABLE ====================
 /* function renderInsight(results) {
@@ -156,7 +189,10 @@ function updateStats(results) {
             <span>📅 ${cand.total_experience_years || 0} years</span>
           </div>
         </div>
-        <div class="match-badge ${badgeClass}">${matchPct}% Match</div>
+        <div class="match-badge ${badgeClass}">
+          ${matchPct}% Match
+          ${cand.needs_verification ? '<div style="font-size: 0.7rem; margin-top: 4px;">⚠️ Verify</div>' : ''}
+        </div>
       </div>
 
       ${
@@ -238,6 +274,11 @@ function renderInsight(results) {
         .filter(Boolean)
         .join(", ") || "Unknown";
 
+    // 🔥 NEW: Get freshness info
+    const freshness = cand.freshness_badge || {};
+    const daysOld = cand.days_old !== undefined ? cand.days_old : null;
+    const relativeDate = daysOld !== null ? formatRelativeDate(daysOld) : "Unknown";
+
     row.innerHTML = `
       <div class="candidate-header">
         <div style="display: flex; align-items: center; gap: 0.5rem;">
@@ -248,16 +289,37 @@ function renderInsight(results) {
             ${selectedCandidates.has(cand.candidate_id) ? "checked" : ""}
           />
           <div>
-            <div class="candidate-name">${idx + 1}. ${cand.name || "Unknown"}</div>
+            <div class="candidate-name">
+              ${idx + 1}. ${cand.name || "Unknown"}
+              ${freshness.emoji ? `
+                <span class="freshness-badge" style="
+                  display: inline-block;
+                  padding: 2px 8px;
+                  border-radius: 12px;
+                  font-size: 0.7rem;
+                  font-weight: 600;
+                  margin-left: 8px;
+                  background: ${freshness.color}20;
+                  color: ${freshness.color};
+                  border: 1px solid ${freshness.color}40;
+                ">
+                  ${freshness.emoji} ${freshness.label}
+                </span>
+              ` : ''}
+            </div>
             <div class="candidate-details">
               <span>📍 ${location}</span>
               <span>💼 ${cand.career_stage || "Unknown"}</span>
               <span>🏢 ${cand.primary_industry || "Unknown"}</span>
               <span>📅 ${cand.total_experience_years || 0} years</span>
+              ${daysOld !== null ? `<span>🕐 ${relativeDate}</span>` : ''}
             </div>
           </div>
         </div>
-        <div class="match-badge ${badgeClass}">${matchPct}% Match</div>
+        <div class="match-badge ${badgeClass}">
+          ${matchPct}% Match
+          ${cand.needs_verification ? '<div style="font-size: 0.7rem; margin-top: 4px;">⚠️ Verify</div>' : ''}
+        </div>
       </div>
 
       ${
@@ -829,11 +891,11 @@ async function search() {
             candidate_id: row.candidate_id,
             career_stage: row.position.split("·")[0]?.trim() || "",
             primary_industry: row.position.split("·")[1]?.trim() || "",
-            location_city: "",
-            location_state: "",
-            location_country: "",
-            total_experience_years: 0,
-            summary: row.why,
+            location: row.location || "Unknown", 
+            total_experience_years: row.total_experience_years || 0,  
+            summary: row.why || "",  
+            role_type: row.role_type || "",
+            management_experience_years: row.management_experience_years || 0,
             match: {
               match_percentage: parseInt(
                 row.match_chip.match(/\((\d+)%\)/)?.[1] || 0

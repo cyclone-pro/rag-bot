@@ -137,10 +137,7 @@ function renderInsight(results) {
     const row = document.createElement("div");
     row.className = "insight-row";
 
-    const location =
-      [cand.location_city, cand.location_state, cand.location_country]
-        .filter(Boolean)
-        .join(", ") || "Unknown";
+    const location = cand.location || "Unknown";
 
     row.innerHTML = `
       <div class="candidate-header">
@@ -158,7 +155,23 @@ function renderInsight(results) {
 
       ${
         cand.summary
-          ? `<div style="margin-bottom: 0.75rem; color: var(--text-muted); font-size: 0.9rem">${cand.summary}</div>`
+          ? `
+          <div style="margin-bottom: 0.75rem; color: var(--text-muted); font-size: 0.9rem">
+            <div class="summary-text" id="summary-${idx}">
+              ${cand.summary.length > 200 ? cand.summary.substring(0, 200) + '...' : cand.summary}
+            </div>
+            ${cand.summary.length > 200 ? `
+              <button 
+                class="expand-summary-btn" 
+                data-index="${idx}"
+                data-full-text="${escapeHtml(cand.summary)}"
+                style="color: var(--accent); background: none; border: none; cursor: pointer; font-size: 0.85rem; text-decoration: underline; padding: 0.25rem 0; margin-top: 0.25rem;"
+              >
+                Read more
+              </button>
+            ` : ''}
+          </div>
+          `
           : ""
       }
 
@@ -192,6 +205,22 @@ function renderInsight(results) {
     `;
 
     insightRows.appendChild(row);
+  });
+  document.querySelectorAll(".expand-summary-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const index = btn.dataset.index;
+      const fullText = btn.dataset.fullText;
+      const summaryDiv = document.getElementById(`summary-${index}`);
+      
+      if (btn.textContent.trim() === 'Read more') {
+        summaryDiv.textContent = fullText;
+        btn.textContent = 'Show less';
+      } else {
+        summaryDiv.textContent = fullText.substring(0, 200) + '...';
+        btn.textContent = 'Read more';
+      }
+    });
   });
 
   insightTable.classList.add("visible");

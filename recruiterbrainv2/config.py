@@ -55,8 +55,7 @@ VECTOR_TOP_K = 100        # ANN candidates
 KEYWORD_TOP_K = 50        # Keyword-matched candidates
 FINAL_RETURN = 20         # Results to user
 _milvus_pool = None
-USE_CELERY = os.getenv("USE_CELERY", "false").lower() == "true"
-
+DEFAULT_FRESHNESS_DAYS = 60
 # Vector search
 METRIC = "COSINE"
 EF_SEARCH = 128
@@ -144,6 +143,15 @@ SEARCH_OUTPUT_FIELDS = [
     "source_channel",
     "last_updated",
 ]
+# Freshness presets for UI
+FRESHNESS_PRESETS = {
+    "urgent": {"days": 7, "label": "Last 7 Days", "emoji": "🟢"},
+    "recent": {"days": 30, "label": "Last 30 Days (Recommended)", "emoji": "🟢"},
+    "balanced": {"days": 90, "label": "Last 3 Months", "emoji": "🟡"},
+    "wide": {"days": 180, "label": "Last 6 Months", "emoji": "🟠"},
+    "very_wide": {"days": 365, "label": "Last Year", "emoji": "🔴"},
+    "all": {"days": None, "label": "All Time", "emoji": "⚪"}
+}
 # ========================
 # Thread Pool for Parallel Search
 # ========================
