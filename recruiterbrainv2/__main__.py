@@ -23,6 +23,8 @@ import zipfile
 import io
 import json
 import logging
+import logging.handlers
+
 from openai import AsyncOpenAI, OpenAI
 from pymilvus import client
 from urllib3 import request
@@ -48,20 +50,55 @@ from .audio_transcription import transcribe_audio_whisper
 from .fit_analyzer import analyze_candidate_fit
 from .skill_extractor import extract_requirements
 # ==================== LOGGING SETUP ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('recruiterbrainv2.log')
-    ]
-)
+os.makedirs('logs', exist_ok=True)
 
-logging.getLogger('recruiterbrainv2').setLevel(logging.INFO)
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Console handler
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+console_handler.setFormatter(console_formatter)
+
+# Main log file handler (with rotation)
+file_handler = logging.handlers.RotatingFileHandler(
+    'logs/recruiterbrainv2.log',
+    maxBytes=10 * 1024 * 1024,  # 10 MB
+    backupCount=5,
+    encoding='utf-8'
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(console_formatter)
+
+# Error log file handler (errors only)
+error_handler = logging.handlers.RotatingFileHandler(
+    'logs/errors.log',
+    maxBytes=10 * 1024 * 1024,  # 10 MB
+    backupCount=5,
+    encoding='utf-8'
+)
+error_handler.setLevel(logging.ERROR)
+error_handler.setFormatter(console_formatter)
+
+# Add handlers
+root_logger.handlers.clear()
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+root_logger.addHandler(error_handler)
+
+# Configure third-party loggers
 logging.getLogger('pymilvus').setLevel(logging.WARNING)
 logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+logging.getLogger('uvicorn').setLevel(logging.WARNING)
+logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+
+
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ==================== FASTAPI APP ====================
@@ -70,7 +107,7 @@ app = FastAPI(title="RecruiterBrain v2", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 # ==================== STATIC FILES ====================
