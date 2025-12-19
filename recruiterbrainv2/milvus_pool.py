@@ -274,6 +274,11 @@ class MilvusConnectionPool:
         finally:
             if conn:
                 self.return_connection(conn)
+
+    def list_collections(self):
+        """Expose list_collections for callers that expect a Milvus client."""
+        with self.connection() as client:
+            return client.list_collections()
     
     def _should_recycle(self, conn: PooledMilvusConnection) -> bool:
         """Check if connection should be recycled."""

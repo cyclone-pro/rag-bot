@@ -286,6 +286,12 @@ def search_candidates_v2(
             "location_state": candidate.get("location_state"),
             "location_country": candidate.get("location_country"),
             "match": match_details,
+            "skills_extracted": candidate.get("skills_extracted", ""),  # ← Correct key
+            "tools_and_technologies": candidate.get("tools_and_technologies", ""),  # ← Correct key
+            "tech_stack_primary": candidate.get("tech_stack_primary", ""),  # ← ADD
+            "programming_languages": candidate.get("programming_languages", ""),  # ← ADD
+            "domain_expertise": candidate.get("domain_expertise", ""),  # ← ADD
+            "top_5_skills_with_years": candidate.get("top_5_skills_with_years", ""),    
             "skills": candidate.get("skills_extracted", ""),
             "tools": candidate.get("tools_and_technologies", ""),
             "current_tech_stack": candidate.get("current_tech_stack", ""),
