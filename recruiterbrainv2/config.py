@@ -30,6 +30,7 @@ COLLECTION = os.getenv("MILVUS_COLLECTION", "candidates_v3")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "intfloat/e5-base-v2")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+COLLECTION = os.getenv("MILVUS_COLLECTION", "candidates_v3")
 
 # ========================
 # Cache Configuration 
