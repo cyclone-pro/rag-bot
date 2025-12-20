@@ -1,10 +1,10 @@
-"""Insert candidate data into Milvus."""
+"""Insert candidate data into Milvus with duplicate detection."""
 import logging
 import uuid
+import hashlib
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Tuple, Optional
 from ..config import get_milvus_client, COLLECTION
-ENABLE_CONNECTION_POOL=False
 
 logger = logging.getLogger(__name__)
 
@@ -14,25 +14,264 @@ def generate_candidate_id() -> str:
     return uuid.uuid4().hex[:6].upper()
 
 
-def insert_candidate(candidate_data: Dict, embeddings: Dict, source_channel: str = "Upload") -> str:
+def normalize_phone(phone: str) -> str:
     """
-    Insert candidate into Milvus.
+    Normalize phone number for comparison.
+    
+    Removes all non-digit characters.
+    Example: "(555) 123-4567" -> "5551234567"
+    """
+    if not phone:
+        return ""
+    return ''.join(c for c in phone if c.isdigit())
+
+
+def normalize_email(email: str) -> str:
+    """
+    Normalize email for comparison.
+    
+    Lowercase and strip whitespace.
+    """
+    if not email:
+        return ""
+    return email.lower().strip()
+
+
+def normalize_linkedin(linkedin_url: str) -> str:
+    """
+    Normalize LinkedIn URL for comparison.
+    
+    Removes protocol and trailing slashes.
+    Example: "https://linkedin.com/in/johndoe/" -> "linkedin.com/in/johndoe"
+    """
+    if not linkedin_url:
+        return ""
+    
+    url = linkedin_url.lower().strip()
+    # Remove protocol
+    url = url.replace("https://", "").replace("http://", "")
+    # Remove www
+    url = url.replace("www.", "")
+    # Remove trailing slash
+    url = url.rstrip("/")
+    
+    return url
+
+
+def check_for_duplicate(
+    client,
+    email: str = "",
+    phone: str = "",
+    linkedin_url: str = "",
+    github_url: str = ""
+) -> Optional[Dict]:
+    """
+    Check if candidate already exists in Milvus.
+    
+    Checks in priority order:
+    1. LinkedIn URL (most reliable)
+    2. Email (very reliable)
+    3. Phone (reliable but can change)
+    4. GitHub URL (less reliable but useful)
+    
+    Args:
+        client: Milvus client
+        email: Candidate email
+        phone: Candidate phone
+        linkedin_url: LinkedIn profile URL
+        github_url: GitHub profile URL
     
     Returns:
-        candidate_id
+        Dict with existing candidate info if found, None otherwise
+        {
+            "candidate_id": "ABC123",
+            "name": "John Doe",
+            "email": "john@example.com",
+            "last_updated": "2025-12-20T10:30:00Z",
+            "match_reason": "linkedin_url"
+        }
+    """
+    # Normalize inputs
+    email_norm = normalize_email(email)
+    phone_norm = normalize_phone(phone)
+    linkedin_norm = normalize_linkedin(linkedin_url)
+    github_norm = normalize_linkedin(github_url)  # Same normalization logic
+    
+    # Track which field matched
+    match_checks = []
+    
+    # Priority 1: LinkedIn URL (most unique)
+    if linkedin_norm:
+        match_checks.append({
+            "filter": f'linkedin_url like "%{linkedin_norm}%"',
+            "reason": "linkedin_url",
+            "priority": 1
+        })
+    
+    # Priority 2: Email (very reliable)
+    if email_norm:
+        match_checks.append({
+            "filter": f'email == "{email_norm}"',
+            "reason": "email",
+            "priority": 2
+        })
+    
+    # Priority 3: Phone (reliable but can change)
+    if phone_norm and len(phone_norm) >= 10:  # Only check if we have full phone
+        match_checks.append({
+            "filter": f'phone like "%{phone_norm}%"',
+            "reason": "phone",
+            "priority": 3
+        })
+    
+    # Priority 4: GitHub URL (less common but useful)
+    if github_norm:
+        match_checks.append({
+            "filter": f'github_url like "%{github_norm}%"',
+            "reason": "github_url",
+            "priority": 4
+        })
+    
+    if not match_checks:
+        logger.debug("No identifiers provided for duplicate check")
+        return None
+    
+    # Sort by priority (LinkedIn first, then email, etc.)
+    match_checks.sort(key=lambda x: x["priority"])
+    
+    # Try each check in priority order
+    for check in match_checks:
+        try:
+            results = client.query(
+                collection_name=COLLECTION,
+                filter=check["filter"],
+                output_fields=["candidate_id", "name", "email", "phone", "linkedin_url", "last_updated"],
+                limit=1
+            )
+            
+            if results:
+                existing = results[0]
+                existing["match_reason"] = check["reason"]
+                
+                logger.info(
+                    f"🔍 Duplicate found via {check['reason']}: "
+                    f"{existing['candidate_id']} ({existing.get('name', 'Unknown')})"
+                )
+                
+                return existing
+        
+        except Exception as e:
+            logger.warning(f"Duplicate check failed for {check['reason']}: {e}")
+            continue
+    
+    logger.debug("No duplicate found")
+    return None
+
+
+def get_candidate_version_count(client, base_candidate_id: str) -> int:
+    """
+    Get the number of versions for a candidate.
+    
+    Counts all records with candidate_id starting with base_candidate_id.
+    """
+    try:
+        # Query for all versions
+        filter_expr = f'candidate_id like "{base_candidate_id}%"'
+        
+        results = client.query(
+            collection_name=COLLECTION,
+            filter=filter_expr,
+            output_fields=["candidate_id"],
+            limit=100  # Should never have this many versions
+        )
+        
+        return len(results)
+    
+    except Exception as e:
+        logger.warning(f"Failed to get version count: {e}")
+        return 1
+
+
+def insert_candidate(
+    candidate_data: Dict,
+    embeddings: Dict,
+    source_channel: str = "Upload",
+    check_duplicates: bool = True,
+    create_version: bool = False
+) -> Tuple[str, bool, Optional[str]]:
+    """
+    Insert candidate into Milvus with duplicate detection.
+    
+    Args:
+        candidate_data: Extracted candidate data
+        embeddings: Generated embeddings
+        source_channel: Upload source
+        check_duplicates: Whether to check for duplicates (default: True)
+        create_version: If duplicate found, create new version instead of rejecting (default: False)
+    
+    Returns:
+        Tuple of (candidate_id, is_new, duplicate_reason)
+        - candidate_id: The candidate ID (existing or new)
+        - is_new: True if this is a new candidate, False if duplicate/version
+        - duplicate_reason: If duplicate, what field matched (email, linkedin_url, etc.)
     """
     client = get_milvus_client()
     
-    # Generate candidate_id if not exists
-    candidate_id = candidate_data.get("candidate_id") or generate_candidate_id()
+    # ==================== DUPLICATE CHECK ====================
+    duplicate_info = None
     
-    # Prepare data for Milvus
+    if check_duplicates:
+        logger.info("Checking for duplicates...")
+        
+        duplicate_info = check_for_duplicate(
+            client,
+            email=candidate_data.get("email", ""),
+            phone=candidate_data.get("phone", ""),
+            linkedin_url=candidate_data.get("linkedin_url", ""),
+            github_url=candidate_data.get("github_url", "")
+        )
+        
+        if duplicate_info:
+            existing_id = duplicate_info["candidate_id"]
+            match_reason = duplicate_info["match_reason"]
+            
+            logger.warning(
+                f"⚠️  DUPLICATE DETECTED!\n"
+                f"   Existing ID: {existing_id}\n"
+                f"   Name: {duplicate_info.get('name', 'Unknown')}\n"
+                f"   Matched on: {match_reason}\n"
+                f"   Last updated: {duplicate_info.get('last_updated', 'Unknown')}"
+            )
+            
+            if not create_version:
+                # Don't insert, return existing ID
+                logger.info(f"Returning existing candidate ID: {existing_id}")
+                return existing_id, False, match_reason
+            
+            # Create new version
+            logger.info(f"Creating new version for {existing_id}")
+            
+            version_count = get_candidate_version_count(client, existing_id)
+            versioned_id = f"{existing_id}_v{version_count + 1}"
+            
+            candidate_data["original_candidate_id"] = existing_id
+            candidate_data["version_number"] = version_count + 1
+            candidate_id = versioned_id
+            
+            logger.info(f"Created version ID: {candidate_id}")
+    
+    # ==================== NEW CANDIDATE ====================
+    if not duplicate_info:
+        candidate_id = candidate_data.get("candidate_id") or generate_candidate_id()
+        logger.info(f"Inserting NEW candidate: {candidate_id}")
+    
+    # ==================== PREPARE DATA FOR MILVUS ====================
     milvus_data = {
         # Identity
         "candidate_id": candidate_id,
         "name": candidate_data.get("name", "Unknown"),
-        "email": candidate_data.get("email", ""),
-        "phone": candidate_data.get("phone", ""),
+        "email": normalize_email(candidate_data.get("email", "")),
+        "phone": candidate_data.get("phone", ""),  # Store original format
         "linkedin_url": candidate_data.get("linkedin_url", ""),
         "portfolio_url": candidate_data.get("portfolio_url", ""),
         "github_url": candidate_data.get("github_url", ""),
@@ -99,15 +338,61 @@ def insert_candidate(candidate_data: Dict, embeddings: Dict, source_channel: str
         "role_embedding": embeddings["role_embedding"],
     }
     
-    # Insert into Milvus
+    # ==================== INSERT INTO MILVUS ====================
     try:
         client.insert(
             collection_name=COLLECTION,
             data=[milvus_data]
         )
-        logger.info(f"✅ Inserted candidate {candidate_id} into Milvus")
-        return candidate_id
+        
+        if duplicate_info:
+            logger.info(f"✅ Inserted VERSION: {candidate_id} (version of {duplicate_info['candidate_id']})")
+            return candidate_id, False, duplicate_info["match_reason"]
+        else:
+            logger.info(f"✅ Inserted NEW candidate: {candidate_id}")
+            return candidate_id, True, None
         
     except Exception as e:
         logger.exception(f"Failed to insert candidate {candidate_id}")
         raise RuntimeError(f"Milvus insertion failed: {e}")
+
+
+def update_candidate(
+    candidate_id: str,
+    updated_data: Dict,
+    embeddings: Dict
+) -> str:
+    """
+    Update existing candidate record.
+    
+    Note: Milvus doesn't support in-place updates, so we delete and re-insert.
+    """
+    client = get_milvus_client()
+    
+    try:
+        # Delete existing record
+        logger.info(f"Updating candidate {candidate_id} (delete + re-insert)")
+        
+        client.delete(
+            collection_name=COLLECTION,
+            filter=f'candidate_id == "{candidate_id}"'
+        )
+        
+        # Re-insert with updated data
+        updated_data["candidate_id"] = candidate_id
+        updated_data["last_updated"] = datetime.utcnow().isoformat() + "Z"
+        
+        # Note: We skip duplicate check when updating
+        insert_candidate(
+            updated_data,
+            embeddings,
+            source_channel="Update",
+            check_duplicates=False
+        )
+        
+        logger.info(f"✅ Updated candidate: {candidate_id}")
+        return candidate_id
+        
+    except Exception as e:
+        logger.exception(f"Failed to update candidate {candidate_id}")
+        raise RuntimeError(f"Milvus update failed: {e}")
