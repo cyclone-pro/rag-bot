@@ -286,12 +286,12 @@ def search_candidates_v2(
             "location_state": candidate.get("location_state"),
             "location_country": candidate.get("location_country"),
             "match": match_details,
-            "skills_extracted": candidate.get("skills_extracted", ""),  # ← Correct key
-            "tools_and_technologies": candidate.get("tools_and_technologies", ""),  # ← Correct key
-            "tech_stack_primary": candidate.get("tech_stack_primary", ""),  # ← ADD
-            "programming_languages": candidate.get("programming_languages", ""),  # ← ADD
-            "domain_expertise": candidate.get("domain_expertise", ""),  # ← ADD
-            "top_5_skills_with_years": candidate.get("top_5_skills_with_years", ""),    
+            "skills_extracted": candidate.get("skills_extracted", ""),  
+            "tools_and_technologies": candidate.get("tools_and_technologies", ""),  
+            "tech_stack_primary": candidate.get("tech_stack_primary", ""),  
+            "programming_languages": candidate.get("programming_languages", ""),  
+            "domain_expertise": candidate.get("domain_expertise", ""),  
+            "top_5_skills_with_years": candidate.get("top_5_skills_with_years", ""),
             "skills": candidate.get("skills_extracted", ""),
             "tools": candidate.get("tools_and_technologies", ""),
             "current_tech_stack": candidate.get("current_tech_stack", ""),
@@ -312,7 +312,7 @@ def search_candidates_v2(
         "search_mode": search_mode,
         "query": query,
         "original_query": query,
-        "freshness_filter": freshness_days,  # 🔥 Include in response
+        "freshness_filter": freshness_days, 
     }
     
     # ==================== CACHE RESULT ====================
