@@ -1,0 +1,35 @@
+# AI Call Agent Requirements
+# Telnyx + Deepgram + Google TTS + OpenAI
+
+# Core dependencies
+fastapi>=0.104.1
+uvicorn>=0.24.0
+websockets>=12.0
+python-dotenv>=1.0.0
+
+# Telephony
+telnyx>=3.17.0
+
+# Speech services
+deepgram-sdk>=3.2.0
+google-cloud-texttospeech>=2.14.1
+google-cloud-storage>=2.10.0
+
+# LLM
+openai>=1.6.1
+
+# Audio processing
+pydub>=0.25.1
+
+# Database (for your existing stack)
+sqlalchemy>=2.0.23
+psycopg2-binary>=2.9.9
+pymilvus>=2.3.4
+
+# Background tasks
+celery>=5.3.4
+redis>=5.0.1
+
+# Utilities
+aiofiles>=23.2.1
+httpx>=0.25.2
