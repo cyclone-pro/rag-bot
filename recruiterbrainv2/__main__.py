@@ -3,30 +3,66 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import signal
 from celery import result
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse  
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
 import logging
+import logging.handlers
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Generator
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 import base64
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from fastapi import UploadFile, File
 from fastapi import BackgroundTasks
 from fastapi import Response
 import zipfile
 import io
 import json
-import logging
+from pathlib import Path
 from openai import AsyncOpenAI, OpenAI
 from pymilvus import client
 from urllib3 import request
-from recruiterbrainv2.config import COLLECTION, ENABLE_CACHE, SEARCH_OUTPUT_FIELDS, get_milvus_client
+
+# Try to import magic for MIME type checking
+try:
+    import magic
+    MAGIC_AVAILABLE = True
+except ImportError:
+    MAGIC_AVAILABLE = False
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.warning(
+        "python-magic not available. File type validation will be limited. "
+        "Install with: pip install python-magic-bin (Windows) or pip install python-magic (Mac/Linux)"
+    )
+
+# Import COLLECTION with fallback
+try:
+    from recruiterbrainv2.config import COLLECTION
+except ImportError:
+    # Fallback if not defined in config
+    COLLECTION = os.getenv("MILVUS_COLLECTION", "candidates_v3")
+    
+from recruiterbrainv2.config import (
+    ENABLE_CACHE, 
+    SEARCH_OUTPUT_FIELDS, 
+    get_milvus_client,
+    ENABLE_CONNECTION_POOL
+)
+
+# Try to import pool with fallback
+try:
+    from recruiterbrainv2.config import get_milvus_pool
+    HAS_POOL = True
+except ImportError:
+    HAS_POOL = False
+
 from .jobs import get_job_store, JobStatus
 from .workers import process_resume_upload
 from .celery_app import celery_app
@@ -47,32 +83,78 @@ from .ingestion import (
 from .audio_transcription import transcribe_audio_whisper
 from .fit_analyzer import analyze_candidate_fit
 from .skill_extractor import extract_requirements
-# ==================== LOGGING SETUP ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('recruiterbrainv2.log')
-    ]
-)
 
-logging.getLogger('recruiterbrainv2').setLevel(logging.INFO)
+# ==================== LOGGING SETUP ====================
+os.makedirs('logs', exist_ok=True)
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Console handler
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+console_handler.setFormatter(console_formatter)
+
+# Main log file handler (with rotation)
+file_handler = logging.handlers.RotatingFileHandler(
+    'logs/recruiterbrainv2.log',
+    maxBytes=10 * 1024 * 1024,  # 10 MB
+    backupCount=5,
+    encoding='utf-8'
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(console_formatter)
+
+# Error log file handler (errors only)
+error_handler = logging.handlers.RotatingFileHandler(
+    'logs/errors.log',
+    maxBytes=10 * 1024 * 1024,  # 10 MB
+    backupCount=5,
+    encoding='utf-8'
+)
+error_handler.setLevel(logging.ERROR)
+error_handler.setFormatter(console_formatter)
+
+# Add handlers
+root_logger.handlers.clear()
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+root_logger.addHandler(error_handler)
+
+# Configure third-party loggers
 logging.getLogger('pymilvus').setLevel(logging.WARNING)
 logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+logging.getLogger('uvicorn').setLevel(logging.WARNING)
+logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ==================== FASTAPI APP ====================
 app = FastAPI(title="RecruiterBrain v2", version="2.0.0")
 
+# ==================== CORS - SECURE CONFIGURATION ====================
+# Get allowed origins from environment or use defaults
+ALLOWED_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:8000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,  # ✅ Restricted to specific domains
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+logger.info(f"CORS enabled for origins: {ALLOWED_ORIGINS}")
+
 # ==================== STATIC FILES ====================
 BASE_DIR = os.path.dirname(__file__)
 static_dir = os.path.join(BASE_DIR, "static")
@@ -81,9 +163,112 @@ if os.path.exists(static_dir):
     logger.info(f"✅ Static files mounted from: {static_dir}")
 else:
     logger.warning(f"⚠️  Static directory not found at: {static_dir}")
+
 # ==================== TEMPLATES ====================
-BASE_DIR = os.path.dirname(__file__)
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+
+# ==================== FILE UPLOAD SECURITY ====================
+
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.doc', '.txt'}
+ALLOWED_MIME_TYPES = {
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/msword',
+    'text/plain'
+}
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize uploaded filename to prevent path traversal attacks.
+    
+    Args:
+        filename: Original filename
+        
+    Returns:
+        Safe filename with only alphanumeric, dash, underscore
+    """
+    path = Path(filename)
+    ext = path.suffix.lower()
+    name = path.stem
+    
+    # Remove dangerous characters
+    safe_name = "".join(c for c in name if c.isalnum() or c in '-_')
+    
+    # Limit length
+    safe_name = safe_name[:100]
+    
+    # Add timestamp to prevent collisions
+    timestamp = int(time.time())
+    
+    return f"{safe_name}_{timestamp}{ext}"
+
+
+async def validate_upload_file(file: UploadFile) -> tuple[bytes, str]:
+    """
+    Validate uploaded file for security and correctness.
+    
+    Checks:
+    - File size limit
+    - Extension whitelist
+    - MIME type verification (if python-magic available)
+    - Filename sanitization
+    
+    Args:
+        file: Uploaded file
+        
+    Returns:
+        Tuple of (file_bytes, safe_filename)
+        
+    Raises:
+        HTTPException: If validation fails
+    """
+    # Read file
+    file_bytes = await file.read()
+    file_size = len(file_bytes)
+    
+    # Check size
+    if file_size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large: {file_size / 1024 / 1024:.2f} MB (max 10 MB)"
+        )
+    
+    if file_size < 100:
+        raise HTTPException(
+            status_code=400,
+            detail="File too small (likely empty or corrupted)"
+        )
+    
+    # Check extension
+    filename = file.filename or "unknown.pdf"
+    ext = Path(filename).suffix.lower()
+    
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type: {ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+        )
+    
+    # Check MIME type (if magic is available)
+    if MAGIC_AVAILABLE:
+        try:
+            mime = magic.from_buffer(file_bytes[:1024], mime=True)
+            if mime not in ALLOWED_MIME_TYPES:
+                logger.warning(
+                    f"File content does not match extension. "
+                    f"Expected PDF/DOCX/DOC/TXT but detected: {mime}"
+                )
+                # Don't reject, just warn - magic can be unreliable
+        except Exception as e:
+            logger.warning(f"MIME type check failed: {e}")
+    
+    # Sanitize filename
+    safe_filename = sanitize_filename(filename)
+    
+    logger.info(f"✅ File validated: {safe_filename} ({file_size / 1024:.1f} KB)")
+    
+    return file_bytes, safe_filename
 
 
 # ==================== RATE LIMITING ====================
@@ -112,6 +297,7 @@ async def serve_script():
     if os.path.exists(js_path):
         return FileResponse(js_path, media_type="application/javascript")
     raise HTTPException(status_code=404, detail="JS file not found")
+
 def get_client_ip(request: Request) -> str:
     """Extract client IP from request."""
     # Check X-Forwarded-For header (for proxies)
@@ -158,6 +344,8 @@ async def check_rate_limit(request: Request, endpoint: str):
             headers={"Retry-After": str(retry_after)}
         )
 
+# ==================== CONNECTION POOL ENDPOINTS ====================
+
 @app.get("/v2/pool/stats")
 async def get_pool_stats():
     """
@@ -165,9 +353,7 @@ async def get_pool_stats():
     
     Useful for monitoring and debugging.
     """
-    from .config import get_milvus_pool, ENABLE_CONNECTION_POOL
-    
-    if not ENABLE_CONNECTION_POOL:
+    if not ENABLE_CONNECTION_POOL or not HAS_POOL:
         return {
             "pooling_enabled": False,
             "message": "Connection pooling is disabled"
@@ -191,9 +377,7 @@ async def get_pool_stats():
 @app.post("/v2/pool/health_check")
 async def pool_health_check():
     """Run health check on all pool connections."""
-    from .config import get_milvus_pool, ENABLE_CONNECTION_POOL
-    
-    if not ENABLE_CONNECTION_POOL:
+    if not ENABLE_CONNECTION_POOL or not HAS_POOL:
         return {"error": "Connection pooling is disabled"}
     
     pool = get_milvus_pool()
@@ -205,6 +389,7 @@ async def pool_health_check():
         "total_connections": stats["active_connections"],
         "health_percentage": round((healthy_count / stats["active_connections"]) * 100, 1)
     }
+
 # ==================== CUSTOM ERROR HANDLERS ====================
 
 @app.exception_handler(429)
@@ -232,6 +417,12 @@ class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=10000)
     filters: Optional[Dict[str, Any]] = None
     show_contacts: bool = False
+    
+    @validator('question')
+    def validate_question(cls, v):
+        if not v.strip():
+            raise ValueError('Question cannot be empty')
+        return v.strip()
 
 
 class ChatResponse(BaseModel):
@@ -246,6 +437,12 @@ class InsightRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=5000)
     filters: Optional[Dict[str, Any]] = None
     show_contacts: bool = False
+    
+    @validator('question')
+    def validate_question(cls, v):
+        if not v.strip():
+            raise ValueError('Question cannot be empty')
+        return v.strip()
 
 
 class InsightResponse(BaseModel):
@@ -281,6 +478,83 @@ class JobStatusResponse(BaseModel):
 class CompareRequest(BaseModel):
     candidates: List[Dict[str, Any]]
     job_requirements: str
+
+# ==================== STARTUP / SHUTDOWN EVENTS ====================
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize application resources on startup."""
+    logger.info("="*60)
+    logger.info("Starting RecruiterBrain v2...")
+    logger.info("="*60)
+    
+    # Log configuration
+    logger.info(f"CORS origins: {ALLOWED_ORIGINS}")
+    logger.info(f"Connection pooling: {'enabled' if ENABLE_CONNECTION_POOL else 'disabled'}")
+    logger.info(f"Cache: {'enabled' if ENABLE_CACHE else 'disabled'}")
+    logger.info(f"Target collection: {COLLECTION}")
+    
+    # Test Milvus connection
+    try:
+        client = get_milvus_client()
+        collections = client.list_collections()
+        logger.info(f"✅ Milvus connected: {len(collections)} collections")
+        if COLLECTION not in collections:
+            logger.warning(f"⚠️  Target collection '{COLLECTION}' not found!")
+    except Exception as e:
+        logger.error(f"❌ Milvus connection failed: {e}")
+    
+    # Test Redis connection
+    try:
+        cache = get_cache()
+        cache.redis_client.ping()
+        logger.info("✅ Redis connected")
+    except Exception as e:
+        logger.error(f"❌ Redis connection failed: {e}")
+    
+    # Check Celery workers
+    try:
+        from .config import USE_CELERY
+        if USE_CELERY:
+            inspect = celery_app.control.inspect()
+            stats = inspect.stats()
+            if stats:
+                logger.info(f"✅ Celery workers: {len(stats)}")
+            else:
+                logger.warning("⚠️  No Celery workers detected (async uploads disabled)")
+    except Exception as e:
+        logger.warning(f"Celery check failed: {e}")
+    
+    logger.info("="*60)
+    logger.info("RecruiterBrain v2 started successfully!")
+    logger.info("="*60)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup resources on shutdown."""
+    logger.info("Shutting down RecruiterBrain v2...")
+    
+    # Close connection pool if enabled
+    if ENABLE_CONNECTION_POOL and HAS_POOL:
+        try:
+            pool = get_milvus_pool()
+            pool.shutdown()
+            logger.info("✓ Milvus connection pool closed")
+        except Exception as e:
+            logger.error(f"Error closing Milvus pool: {e}")
+    
+    # Close Redis
+    try:
+        cache = get_cache()
+        cache.redis_client.close()
+        logger.info("✓ Redis connection closed")
+    except Exception as e:
+        logger.error(f"Error closing Redis: {e}")
+    
+    logger.info("Shutdown complete")
+
+
 # ==================== ROUTES ====================
 
 @app.get("/", response_class=HTMLResponse)
@@ -306,7 +580,11 @@ def root() -> Dict[str, str]:
 
 
 @app.post("/v2/chat", response_model=ChatResponse)
-async def chat_v2_endpoint(request: Request, chat_input: ChatRequest,response: Response) -> Dict[str, Optional[str]]:
+async def chat_v2_endpoint(
+    request: Request, 
+    chat_input: ChatRequest,
+    response: Response
+) -> Dict[str, Optional[str]]:
     """
     Chat endpoint - conversational search.
     
@@ -314,17 +592,12 @@ async def chat_v2_endpoint(request: Request, chat_input: ChatRequest,response: R
     """
     # Check rate limit
     await check_rate_limit(request, "chat")
-    # Get current limit status
-    limiter = get_rate_limiter()
-    client_ip = request.client.host
     
     # Add headers
     response.headers["X-RateLimit-Limit"] = "20"
     response.headers["X-RateLimit-Window"] = "60"
-    question = chat_input.question.strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="Please enter a question.")
-
+    
+    question = chat_input.question
     filters = chat_input.filters or {}
     top_k = int(filters.get("top_k", 10))
     career_stage = filters.get("career_stage")
@@ -357,10 +630,7 @@ async def insight_v2_endpoint(request: Request, payload: InsightRequest) -> Dict
     # Check rate limit
     await check_rate_limit(request, "insight")
     
-    question = payload.question.strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="Please enter a question.")
-
+    question = payload.question
     filters = payload.filters or {}
     top_k = int(filters.get("top_k", 20))
     career_stage = filters.get("career_stage")
@@ -388,35 +658,27 @@ async def insight_v2_endpoint(request: Request, payload: InsightRequest) -> Dict
         logger.exception("V2 insight error")
         return InsightResponse(error=str(exc)).model_dump()
 
-
+"""
 @app.post("/v2/upload_resume", response_model=ResumeUploadResponse)
 async def upload_resume(request: Request, file: UploadFile = File(...)) -> Dict[str, Any]:
-    """
-    Synchronous resume upload (blocking).
-    
-    Rate limit: 5 uploads per minute per IP.
-    
-    Note: For production, use /v2/upload_resume_celery instead.
-    """
+   
     # Check rate limit
     await check_rate_limit(request, "upload")
     
-    filename = file.filename or "unknown.pdf"
+    # Validate and sanitize file
+    file_bytes, safe_filename = await validate_upload_file(file)
     
     logger.info("="*60)
-    logger.info(f"📤 RESUME UPLOAD STARTED: {filename}")
+    logger.info(f"📤 RESUME UPLOAD STARTED: {safe_filename}")
     logger.info("="*60)
     
     try:
-        # Read file bytes
-        logger.info("Step 0: Reading file bytes...")
-        file_bytes = await file.read()
         file_size_mb = len(file_bytes) / (1024 * 1024)
-        logger.info(f"✅ File read complete: {file_size_mb:.2f} MB")
+        logger.info(f"✅ File validated: {file_size_mb:.2f} MB")
         
         # Parse file
-        logger.info(f"Step 1: Parsing file ({filename})...")
-        resume_text = parse_file(filename, file_bytes)
+        logger.info(f"Step 1: Parsing file ({safe_filename})...")
+        resume_text = parse_file(safe_filename, file_bytes)
         logger.info(f"✅ Text extracted: {len(resume_text)} characters")
         
         if len(resume_text) < 100:
@@ -469,7 +731,7 @@ async def upload_resume(request: Request, file: UploadFile = File(...)) -> Dict[
         logger.exception(f"❌ UPLOAD FAILED: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-
+"""
 @app.post("/v2/upload_resume_async", response_model=AsyncResumeUploadResponse)
 async def upload_resume_async(
     request: Request,
@@ -486,31 +748,25 @@ async def upload_resume_async(
     # Check rate limit
     await check_rate_limit(request, "upload")
     
-    filename = file.filename or "unknown.pdf"
-    logger.info(f"📤 ASYNC RESUME UPLOAD: {filename}")
+    # Validate and sanitize file
+    file_bytes, safe_filename = await validate_upload_file(file)
+    file_size_mb = len(file_bytes) / (1024 * 1024)
+    
+    logger.info(f"📤 ASYNC RESUME UPLOAD: {safe_filename} ({file_size_mb:.2f} MB)")
     
     try:
-        # Read and validate file
-        file_bytes = await file.read()
-        file_size_mb = len(file_bytes) / (1024 * 1024)
-        
-        if file_size_mb > 10:
-            raise ValueError(f"File too large: {file_size_mb:.2f} MB (max 10 MB)")
-        
-        logger.info(f"✅ File validated: {file_size_mb:.2f} MB")
-        
         # Create job
         job_store = get_job_store()
         job_id = job_store.create_job(
             job_type="resume_upload",
-            params={"filename": filename, "file_size_mb": file_size_mb}
+            params={"filename": safe_filename, "file_size_mb": file_size_mb}
         )
         
         # Schedule background task
         background_tasks.add_task(
             process_resume_upload,
             job_id=job_id,
-            filename=filename,
+            filename=safe_filename,
             file_bytes=file_bytes,
             source_channel="Upload"
         )
@@ -523,10 +779,6 @@ async def upload_resume_async(
             message=f"Resume queued. Check status at /v2/jobs/{job_id}"
         ).model_dump()
         
-    except ValueError as e:
-        logger.error(f"❌ Validation error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    
     except Exception as e:
         logger.exception(f"❌ Upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
@@ -551,26 +803,20 @@ async def upload_resume_celery(
     # Check rate limit
     await check_rate_limit(request, "upload")
     
-    filename = file.filename or "unknown.pdf"
-    logger.info(f"📤 CELERY RESUME UPLOAD: {filename}")
+    # Validate and sanitize file
+    file_bytes, safe_filename = await validate_upload_file(file)
+    file_size_mb = len(file_bytes) / (1024 * 1024)
+    
+    logger.info(f"📤 CELERY RESUME UPLOAD: {safe_filename} ({file_size_mb:.2f} MB)")
     
     try:
-        # Read and validate file
-        file_bytes = await file.read()
-        file_size_mb = len(file_bytes) / (1024 * 1024)
-        
-        if file_size_mb > 10:
-            raise ValueError(f"File too large: {file_size_mb:.2f} MB (max 10 MB)")
-        
-        logger.info(f"✅ File validated: {file_size_mb:.2f} MB")
-        
         # Encode to base64 (Celery serialization)
         file_bytes_b64 = base64.b64encode(file_bytes).decode('utf-8')
         
         # Submit to Celery
         task = process_resume_task.apply_async(
             kwargs={
-                "filename": filename,
+                "filename": safe_filename,
                 "file_bytes_b64": file_bytes_b64,
                 "source_channel": "Upload"
             },
@@ -585,10 +831,6 @@ async def upload_resume_celery(
             message=f"Resume queued. Check status at /v2/jobs/celery/{task.id}"
         ).model_dump()
         
-    except ValueError as e:
-        logger.error(f"❌ Validation error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    
     except Exception as e:
         logger.exception(f"❌ Upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
@@ -600,7 +842,13 @@ async def bulk_upload_resumes(
     files: list[UploadFile] = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ) -> Dict[str, Any]:
-    """Bulk upload multiple resumes (with optional Celery)."""
+    """
+    Bulk upload multiple resumes (with optional Celery).
+    
+    Supports:
+    - Multiple individual files
+    - ZIP files (extracts all resumes inside)
+    """
     # await check_rate_limit(request, "bulk_upload")
     
     if len(files) > 20:
@@ -615,11 +863,8 @@ async def bulk_upload_resumes(
         filename = file.filename or "unknown.pdf"
         
         # Check if ZIP file
-        if filename.endswith('.zip'):
+        if filename.lower().endswith('.zip'):
             logger.info(f"📦 Extracting ZIP file: {filename}")
-            
-            import zipfile
-            import io
             
             try:
                 with zipfile.ZipFile(io.BytesIO(file_bytes)) as zip_file:
@@ -627,12 +872,16 @@ async def bulk_upload_resumes(
                         if member.endswith('/') or member.startswith('__MACOSX'):
                             continue
                         
-                        if member.endswith(('.docx', '.pdf', '.doc', '.txt')):
+                        if member.lower().endswith(('.docx', '.pdf', '.doc', '.txt')):
                             member_bytes = zip_file.read(member)
+                            
+                            # Sanitize extracted filename
+                            safe_member_name = sanitize_filename(member)
+                            
                             member_bytes_b64 = base64.b64encode(member_bytes).decode('utf-8')
                             
                             resume_data.append({
-                                "filename": member,
+                                "filename": safe_member_name,
                                 "file_bytes_b64": member_bytes_b64,
                             })
                             
@@ -643,9 +892,18 @@ async def bulk_upload_resumes(
                 raise HTTPException(status_code=400, detail=f"Invalid ZIP file: {e}")
         
         else:
+            # Validate individual file
+            ext = Path(filename).suffix.lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                logger.warning(f"Skipping invalid file: {filename}")
+                continue
+            
+            # Sanitize filename
+            safe_filename = sanitize_filename(filename)
+            
             file_bytes_b64 = base64.b64encode(file_bytes).decode('utf-8')
             resume_data.append({
-                "filename": filename,
+                "filename": safe_filename,
                 "file_bytes_b64": file_bytes_b64,
             })
     
@@ -699,6 +957,7 @@ async def bulk_upload_resumes(
             "total_files": len(resume_data),
             "message": f"Processing {len(resume_data)} resumes sequentially (BackgroundTasks)"
         }
+
 
 @app.get("/v2/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(request: Request, job_id: str) -> Dict[str, Any]:
@@ -779,23 +1038,7 @@ async def cancel_job(request: Request, job_id: str):
     else:
         return {"message": f"Job {job_id} is {job_data['status']}, cannot cancel"}
 
-@app.exception_handler(429)
-async def rate_limit_handler(request: Request, exc):
-    """Custom 429 response with helpful message."""
-    
-    retry_after = exc.headers.get("Retry-After", "60")
-    
-    return JSONResponse(
-        status_code=429,
-        content={
-            "error": "Rate Limit Exceeded",
-            "message": "You've made too many requests. Please slow down.",
-            "retry_after_seconds": int(retry_after),
-            "retry_at": (datetime.utcnow() + timedelta(seconds=int(retry_after))).isoformat() + "Z",
-            "documentation": "https://your-docs.com/rate-limits"
-        },
-        headers={"Retry-After": retry_after}
-    )
+
 @app.post("/v2/transcribe")
 async def transcribe_audio(
     request: Request,
@@ -856,10 +1099,11 @@ async def transcribe_audio(
             detail=f"Transcription failed: {str(e)}"
         )
 
+
 @app.post("/v2/analyze_fit")
 async def analyze_candidate_fit_endpoint(
     request: Request,
-    payload: AnalyzeFitRequest  # Use the Pydantic model here
+    payload: AnalyzeFitRequest
 ) -> Dict[str, Any]:
     """
     Deep candidate fit analysis (Phase 2).
@@ -867,27 +1111,6 @@ async def analyze_candidate_fit_endpoint(
     Called when user clicks "Why?" button in insight mode.
     
     Rate limit: 20 requests per minute (same as chat).
-    
-    Request body:
-    {
-        "job_description": "Find Oracle Fusion ERP developers...",
-        "candidate_id": "D6DA7C"
-    }
-    
-    Response:
-    {
-        "candidate_id": "D6DA7C",
-        "candidate_name": "Athreya Sunki",
-        "fit_level": "not_fit",
-        "score": 20,
-        "fit_badge": "❌ NOT A FIT",
-        "explanation": "Detailed explanation...",
-        "strengths": [...],
-        "weaknesses": [...],
-        "recommendation": "DO NOT PROCEED...",
-        "critical_mismatch": {...},
-        "onboarding_estimate": {...}
-    }
     """
     # Check rate limit (reuse chat limit)
     await check_rate_limit(request, "chat")
@@ -1069,8 +1292,10 @@ async def analyze_candidate_fit_endpoint(
             status_code=500,
             detail=f"Fit analysis failed: {str(e)}"
         )
+
+
 @app.post('/compare_candidates')
-def compare_candidates(req: CompareRequest):  # ← Use Pydantic model
+def compare_candidates(req: CompareRequest):
     """Phase 3: Multi-candidate comparison endpoint."""
     try:
         candidates = req.candidates
@@ -1154,16 +1379,200 @@ Rules:
             content={"error": str(e)}
         )
 
-# ==================== HEALTH CHECK ====================
+
+# ==================== COMPREHENSIVE HEALTH CHECK ====================
 
 @app.get("/health")
-def health_check():
-    """Health check endpoint for monitoring."""
-    return {
-        "status": "healthy",
+async def health_check():
+    """
+    Comprehensive health check for all services.
+    
+    Checks:
+    - Redis connectivity
+    - Milvus connectivity and collection access
+    - Celery worker status (if enabled)
+    - OpenAI API key configuration
+    
+    Returns 200 if all critical services healthy, 503 otherwise.
+    """
+    checks = {}
+    all_healthy = True
+    warnings = []
+    
+    # Check Redis
+    try:
+        cache = get_cache()
+        cache.redis_client.ping()  # This throws exception if Redis is down
+        
+        # Get Redis info
+        info = cache.redis_client.info()
+        checks["redis"] = {
+            "status": "healthy",
+            "connected_clients": info.get("connected_clients", 0),
+            "used_memory_human": info.get("used_memory_human", "unknown")
+        }
+        logger.debug("✓ Redis health check passed")
+    except Exception as e:
+        checks["redis"] = {"status": "unhealthy", "error": str(e)}
+        all_healthy = False
+        logger.error(f"✗ Redis health check failed: {e}")
+    
+    # Check Milvus
+    try:
+        client = get_milvus_client()
+        collections = client.list_collections()
+        
+        # Check if our collection exists
+        collection_exists = COLLECTION in collections
+        
+        checks["milvus"] = {
+            "status": "healthy" if collection_exists else "degraded",
+            "collections": len(collections),
+            "target_collection": COLLECTION,
+            "target_exists": collection_exists
+        }
+        
+        if not collection_exists:
+            warnings.append(f"Target collection '{COLLECTION}' not found")
+        
+        logger.debug("✓ Milvus health check passed")
+    except Exception as e:
+        checks["milvus"] = {"status": "unhealthy", "error": str(e)}
+        all_healthy = False
+        logger.error(f"✗ Milvus health check failed: {e}")
+    
+    # Check Celery (if enabled)
+    try:
+        from .config import USE_CELERY
+        
+        if USE_CELERY:
+            inspect = celery_app.control.inspect()
+            stats = inspect.stats()
+            active = inspect.active()
+            
+            if stats:
+                worker_count = len(stats)
+                active_tasks = sum(len(tasks) for tasks in (active or {}).values())
+                
+                checks["celery"] = {
+                    "status": "healthy",
+                    "workers": worker_count,
+                    "active_tasks": active_tasks,
+                    "worker_names": list(stats.keys())
+                }
+                logger.debug(f"✓ Celery health check passed: {worker_count} workers")
+            else:
+                checks["celery"] = {
+                    "status": "unhealthy",
+                    "error": "No workers running",
+                    "suggestion": "Start with: celery -A recruiterbrainv2.celery_app worker"
+                }
+                warnings.append("Celery workers not running (async uploads disabled)")
+        else:
+            checks["celery"] = {"status": "disabled"}
+    except Exception as e:
+        checks["celery"] = {"status": "error", "error": str(e)}
+        warnings.append(f"Celery check failed: {e}")
+    
+    # Check OpenAI API key
+    try:
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        
+        if not openai_key:
+            checks["openai"] = {
+                "status": "unhealthy",
+                "error": "OPENAI_API_KEY not configured"
+            }
+            all_healthy = False
+        elif "your-key-here" in openai_key or not openai_key.startswith("sk-"):
+            checks["openai"] = {
+                "status": "unhealthy",
+                "error": "OPENAI_API_KEY appears to be placeholder"
+            }
+            all_healthy = False
+        else:
+            checks["openai"] = {
+                "status": "healthy",
+                "configured": True
+            }
+    except Exception as e:
+        checks["openai"] = {"status": "error", "error": str(e)}
+    
+    # Build response
+    response = {
+        "status": "healthy" if all_healthy else "degraded",
         "version": "2.0.0",
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "checks": checks
     }
+    
+    if warnings:
+        response["warnings"] = warnings
+    
+    # Return appropriate status code
+    if all_healthy:
+        return response
+    else:
+        # Return 503 if any critical service is down
+        return JSONResponse(status_code=503, content=response)
+
+
+# ==================== GRACEFUL SHUTDOWN HANDLER ====================
+
+shutdown_initiated = False
+
+def graceful_shutdown(signum, frame):
+    """
+    Handle graceful shutdown on SIGTERM/SIGINT.
+    
+    This runs when:
+    - User presses Ctrl+C (SIGINT)
+    - systemctl stop service (SIGTERM)
+    - Docker/Kubernetes stops container (SIGTERM)
+    - Server shutdown/reboot (SIGTERM)
+    
+    What it does:
+    - Closes Milvus connection pool cleanly
+    - Closes Redis connections
+    - Prevents data corruption
+    - Allows in-progress requests to finish
+    """
+    global shutdown_initiated
+    
+    if shutdown_initiated:
+        logger.warning("Force shutdown initiated!")
+        sys.exit(1)
+    
+    shutdown_initiated = True
+    signal_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+    logger.info(f"Received {signal_name}, shutting down gracefully...")
+    
+    # Close Milvus pool
+    if ENABLE_CONNECTION_POOL and HAS_POOL:
+        try:
+            pool = get_milvus_pool()
+            pool.shutdown()
+            logger.info("✓ Milvus connection pool closed")
+        except Exception as e:
+            logger.error(f"Error closing Milvus pool: {e}")
+    
+    # Close Redis
+    try:
+        cache = get_cache()
+        cache.redis_client.close()
+        logger.info("✓ Redis connection closed")
+    except Exception as e:
+        logger.error(f"Error closing Redis: {e}")
+    
+    logger.info("Shutdown complete")
+    sys.exit(0)
+
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, graceful_shutdown)
+signal.signal(signal.SIGINT, graceful_shutdown)
+
+logger.info("Signal handlers registered for graceful shutdown")
 
 
 # ==================== MAIN ====================
