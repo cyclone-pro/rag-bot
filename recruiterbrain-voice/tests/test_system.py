@@ -76,7 +76,7 @@ async def test_interview_session():
                 "skills": ["Python", "FastAPI"]
             },
             jd_data={
-                "jd_id": "jd_001",
+                "job_id": "jd_001",
                 "title": "Backend Engineer",
                 "requirements": ["Python", "APIs"]
             },

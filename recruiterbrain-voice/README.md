@@ -92,8 +92,8 @@ Batch Write at End
    # Create database
    sudo -u postgres psql
    CREATE DATABASE recruiterbrain;
-   CREATE USER recruiterbrain_user WITH PASSWORD 'your_password';
-   GRANT ALL PRIVILEGES ON DATABASE recruiterbrain TO recruiterbrain_user;
+   CREATE USER backteam WITH PASSWORD 'your_password';
+   GRANT ALL PRIVILEGES ON DATABASE recruiterbrain TO backteam;
    ```
 
 2. **Milvus** (v2.3+)
@@ -153,7 +153,7 @@ nano .env  # Edit with your credentials
 **Required variables:**
 ```env
 # PostgreSQL
-POSTGRES_USER=recruiterbrain_user
+POSTGRES_USER=backteam
 POSTGRES_PASSWORD=your_password
 
 # LiveKit
@@ -184,7 +184,7 @@ JWT_SECRET_KEY=$(openssl rand -hex 32)
 
 ```bash
 # PostgreSQL
-psql -U recruiterbrain_user -d recruiterbrain -f migrations/002_add_missing_columns.sql
+psql -U backteam -d recruiterbrain -f migrations/002_add_missing_columns.sql
 
 # Milvus
 python migrations/setup_milvus_v2.py
@@ -288,7 +288,7 @@ curl -X POST http://localhost:8000/api/v1/interview/start \
       "projects": ["Built microservices platform"]
     },
     "job_description": {
-      "jd_id": "jd_456",
+      "job_id": "jd_456",
       "title": "Senior Backend Engineer",
       "requirements": ["5+ years Python", "API design", "Databases"]
     }
@@ -379,7 +379,7 @@ kubectl apply -f k8s/
 
 ```bash
 # Check PostgreSQL
-psql -U recruiterbrain_user -d recruiterbrain -c "SELECT 1"
+psql -U backteam -d recruiterbrain -c "SELECT 1"
 
 # Check Milvus
 python -c "from pymilvus import connections; connections.connect(); print('OK')"

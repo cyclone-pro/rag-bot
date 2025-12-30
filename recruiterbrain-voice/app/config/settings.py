@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     livekit_url: str
     livekit_api_key: str
     livekit_api_secret: str
-    
+    livekit_sip_domain: str = "54jym8vfe6a.sip.livekit.cloud"
+    api_host: str = "http://localhost:8000"
+
     # ===== DEEPGRAM =====
     deepgram_api_key: str
     deepgram_model: str = "nova-2"

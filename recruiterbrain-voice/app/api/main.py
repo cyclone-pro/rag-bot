@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from app.api.routes import webhooks
 
 from app.config.settings import settings
 from app.services.database import (
@@ -101,6 +102,7 @@ app.include_router(
     tags=["interview"]
 )
 
+app.include_router(webhooks.router, prefix="/api/v1", tags=["webhooks"])
 
 # ==========================================
 # Root Endpoints

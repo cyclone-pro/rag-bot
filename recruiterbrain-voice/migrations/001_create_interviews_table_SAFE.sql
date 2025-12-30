@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS interviews (
     candidate_phone VARCHAR(20),
     
     -- Job description information
-    jd_id VARCHAR(64) NOT NULL,
+    job_id VARCHAR(64) NOT NULL,
     job_title VARCHAR(255),
     
     -- Interview lifecycle status

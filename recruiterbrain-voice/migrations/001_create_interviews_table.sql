@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS interviews (
     candidate_phone VARCHAR(20),
     
     -- Job description information
-    jd_id VARCHAR(64) NOT NULL,
+    job_id VARCHAR(64) NOT NULL,
     job_title VARCHAR(255),
     
     -- Interview lifecycle status
@@ -174,6 +174,6 @@ SHOW shared_buffers;
 -- Grant permissions
 -- ============================================
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON interviews TO recruiterbrain_user;
-GRANT SELECT, INSERT, UPDATE ON interview_transcripts TO recruiterbrain_user;
-GRANT SELECT, INSERT ON audit_log TO recruiterbrain_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON interviews TO backteam;
+GRANT SELECT, INSERT, UPDATE ON interview_transcripts TO backteam;
+GRANT SELECT, INSERT ON audit_log TO backteam;

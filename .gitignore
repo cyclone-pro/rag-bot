@@ -28,5 +28,6 @@ rag3/
 # Credentials
 *.env
 .env.*
+.env.example
 *.key
 *.pem

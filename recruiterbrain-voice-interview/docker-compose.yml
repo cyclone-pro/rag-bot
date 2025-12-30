@@ -7,7 +7,7 @@ services:
     container_name: recruiterbrain-postgres
     environment:
       POSTGRES_DB: recruiterbrain
-      POSTGRES_USER: recruiterbrain_user
+      POSTGRES_USER: backteam
       POSTGRES_PASSWORD: your_postgres_password
     ports:
       - "5432:5432"

@@ -192,7 +192,7 @@ async def create_interview_record(
                 INSERT INTO interviews (
                     interview_id,
                     candidate_id,
-                    jd_id,
+                    job_id,
                     job_title,
                     job_description,
                     interview_status,
@@ -205,7 +205,7 @@ async def create_interview_record(
                 ) VALUES (
                     :interview_id,
                     :candidate_id,
-                    :jd_id,
+                    :job_id,
                     :job_title,
                     :job_description,
                     'initiated',
@@ -221,7 +221,7 @@ async def create_interview_record(
             await session.execute(query, {
                 "interview_id": interview_id,
                 "candidate_id": candidate_data.get("candidate_id"),
-                "jd_id": jd_data.get("jd_id"),
+                "job_id": jd_data.get("job_id"),
                 "job_title": jd_data.get("title", ""),
                 "job_description": jd_data.get("description", ""),
                 "livekit_room_name": livekit_room,
@@ -348,7 +348,7 @@ async def save_interview_completion(
 async def insert_interview_to_milvus(
     interview_id: str,
     candidate_id: str,
-    jd_id: str,
+    job_id: str,
     job_title: str,
     full_transcript: str,
     evaluation_summary: str,
@@ -370,7 +370,7 @@ async def insert_interview_to_milvus(
         data = [{
             "interview_id": interview_id,
             "candidate_id": candidate_id,
-            "jd_id": jd_id,
+            "job_id": job_id,
             "interview_embedding": embedding,
             "job_title": job_title,
             "interview_date": int(interview_date.timestamp()),

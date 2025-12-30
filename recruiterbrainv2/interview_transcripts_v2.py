@@ -107,7 +107,7 @@ def setup_milvus_collection():
         ),
         
         FieldSchema(
-            name="jd_id",
+            name="job_id",
             dtype=DataType.VARCHAR,
             max_length=64,
             description="Job description identifier"
@@ -236,12 +236,12 @@ def setup_milvus_collection():
     )
     print("✅ Index created: candidate_id")
     
-    # Index on jd_id (for "show me all interviews for this position")
+    # Index on job_id (for "show me all interviews for this position")
     collection.create_index(
-        field_name="jd_id",
-        index_name="idx_jd_id"
+        field_name="job_id",
+        index_name="idx_job_id"
     )
-    print("✅ Index created: jd_id")
+    print("✅ Index created: job_id")
     
     # Index on interview_date (for time-range queries)
     collection.create_index(
@@ -294,7 +294,7 @@ def setup_milvus_collection():
     print()
     print("   Scalar Indexes:")
     print("     - candidate_id")
-    print("     - jd_id")
+    print("     - job_id")
     print("     - interview_date")
     print("     - evaluation_score")
     print()

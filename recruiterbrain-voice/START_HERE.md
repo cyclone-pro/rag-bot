@@ -260,7 +260,7 @@ settings.interview_max_duration_seconds = 900  # 15 minutes
 ```sql
 interviews:
   - interview_id (PK)
-  - candidate_id, jd_id
+  - candidate_id, job_id
   - interview_status, call_status
   - conversation_log (JSONB)  -- Full transcript
   - full_transcript (TEXT)    -- For embeddings
@@ -273,7 +273,7 @@ interviews:
 interview_transcripts_v2:
   - interview_id (PK)
   - interview_embedding (768-dim)  -- E5-base-v2
-  - candidate_id, jd_id (indexed)
+  - candidate_id, job_id (indexed)
   - job_title, interview_date (indexed)
   - evaluation_score (indexed)
 ```
@@ -345,7 +345,7 @@ interview_transcripts_v2:
 sudo systemctl status postgresql
 
 # Verify credentials in .env
-POSTGRES_USER=recruiterbrain_user
+POSTGRES_USER=backteam
 POSTGRES_PASSWORD=your_password
 ```
 

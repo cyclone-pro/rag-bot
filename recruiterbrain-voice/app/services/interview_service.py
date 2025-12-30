@@ -109,7 +109,7 @@ class InterviewSession:
             await insert_interview_to_milvus(
                 interview_id=self.interview_id,
                 candidate_id=self.candidate_data["candidate_id"],
-                jd_id=self.jd_data["jd_id"],
+                job_id=self.jd_data["job_id"],
                 job_title=self.jd_data.get("title", ""),
                 transcript_text=transcript_text,
                 evaluation_summary=evaluation.get("summary", ""),

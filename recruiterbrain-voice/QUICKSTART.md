@@ -18,7 +18,7 @@ nano .env
 **Minimum required:**
 ```env
 # PostgreSQL
-POSTGRES_USER=recruiterbrain_user
+POSTGRES_USER=backteam
 POSTGRES_PASSWORD=your_password
 
 # LiveKit (get from cloud.livekit.io)

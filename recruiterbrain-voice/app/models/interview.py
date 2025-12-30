@@ -42,7 +42,7 @@ class CandidateData(BaseModel):
 
 class JobDescriptionData(BaseModel):
     """Job description information"""
-    jd_id: str = Field(..., description="Unique job description identifier")
+    job_id: str = Field(..., description="Unique job description identifier")
     title: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = Field(None, description="Full job description")
     
@@ -184,7 +184,7 @@ class InterviewSearchRequest(BaseModel):
     
     # Filters
     candidate_id: Optional[str] = None
-    jd_id: Optional[str] = None
+    job_id: Optional[str] = None
     min_score: Optional[float] = Field(None, ge=0.0, le=1.0)
     
     # Date range

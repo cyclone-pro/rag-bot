@@ -1,338 +1,194 @@
 """
-LiveKit Voice Agent Worker
-Handles phone interviews with:
-- Deepgram for Speech-to-Text (Nova-2)
-- Google Cloud TTS for Text-to-Speech (Neural2/WaveNet)
-- OpenAI GPT-4o-mini for conversation logic
+LiveKit Voice Agent Worker - LiveKit 0.12.0 Compatible
+Handles phone interviews with AI voice assistant
 """
 
 import logging
 import asyncio
 from typing import Dict, Any
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv()
 
 from livekit import agents, rtc
-from livekit.agents import JobContext, WorkerOptions, cli
-from livekit.plugins import deepgram, google, openai, silero
+from livekit.agents import JobContext, WorkerOptions, cli, llm
+from livekit.agents import voice_assistant
+from livekit.plugins import deepgram, openai, silero
 
 from app.config.settings import settings
-from app.services.interview_service import (
-    get_session,
-    complete_interview_session
-)
 
 
 logger = logging.getLogger(__name__)
 
 
-# ==========================================
-# Agent Entry Point
-# ==========================================
-
 async def entrypoint(ctx: JobContext):
-    """
-    Main agent entry point
-    Called when LiveKit dispatches a job to this worker
-    """
+    """Main agent entry point - called when LiveKit dispatches a job"""
     
-    logger.info(f"Agent started for room: {ctx.room.name}")
-    
-    # Extract interview metadata from room metadata
-    metadata = ctx.room.metadata
-    interview_id = metadata.get("interview_id")
-    
-    if not interview_id:
-        logger.error("No interview_id in room metadata!")
-        return
-    
-    # Get interview session from memory
-    session = get_session(interview_id)
-    
-    if not session:
-        logger.error(f"Interview session {interview_id} not found!")
-        return
-    
-    logger.info(f"Starting interview: {interview_id}")
-    
-    # Mark interview as started
-    session.started_at = datetime.utcnow()
-    
-    # ==========================================
-    # Initialize Voice Pipeline
-    # ==========================================
-    
-    # Speech-to-Text: Deepgram Nova-2
-    stt = deepgram.STT(
-        api_key=settings.deepgram_api_key,
-        model=settings.deepgram_model,
-        language=settings.deepgram_language,
-        smart_format=True,
-        punctuate=True,
-        keywords=[  # Boost technical terms
-            "python", "javascript", "react", "fastapi", "postgresql",
-            "kubernetes", "docker", "aws", "microservices", "api"
-        ]
-    )
-    
-    # Text-to-Speech: Google Cloud Neural2/WaveNet
-    tts = google.TTS(
-        credentials_file=settings.google_application_credentials,
-        voice=settings.google_tts_voice_name,
-        language=settings.google_tts_language_code,
-        speaking_rate=settings.google_tts_speaking_rate,
-        pitch=settings.google_tts_pitch
-    )
-    
-    # LLM: OpenAI GPT-4o-mini
-    llm = openai.LLM(
-        api_key=settings.openai_api_key,
-        model=settings.openai_model,
-        temperature=settings.openai_temperature
-    )
-    
-    # VAD: Silero for voice activity detection
-    vad = silero.VAD.load()
-    
-    # ==========================================
-    # Create Voice Assistant
-    # ==========================================
-    
-    # Build system prompt with interview context
-    system_prompt = build_interview_prompt(
-        candidate_data=session.candidate_data,
-        jd_data=session.jd_data
-    )
-    
-    assistant = agents.VoiceAssistant(
-        vad=vad,
-        stt=stt,
-        llm=llm,
-        tts=tts,
-        
-        # Conversation settings
-        chat_ctx=agents.ChatContext(
-            instructions=system_prompt,
-            messages=[]
-        ),
-        
-        # Interrupt settings
-        allow_interruptions=True,
-        interrupt_speech_duration=0.6,
-        interrupt_min_words=3,
-        
-        # Response settings
-        min_endpointing_delay=0.5,
-        
-        # Callbacks
-        before_llm_cb=before_llm_callback,
-        before_tts_cb=before_tts_callback,
-    )
-    
-    # ==========================================
-    # Start Assistant
-    # ==========================================
-    
-    assistant.start(ctx.room)
-    
-    logger.info(f"Voice assistant started for interview {interview_id}")
-    
-    # Greet the candidate
-    await asyncio.sleep(1.0)  # Let connection stabilize
-    
-    greeting = (
-        f"Hello {session.candidate_data.get('name', 'there')}! "
-        f"Thank you for taking the time to interview for the {session.jd_data.get('title', 'position')}. "
-        f"This will be a {settings.interview_questions_count}-question technical interview "
-        f"and should take about {settings.interview_max_duration_seconds // 60} minutes. "
-        f"I'll be asking you questions about your experience and skills. "
-        f"Feel free to take your time with your answers. Are you ready to begin?"
-    )
-    
-    await assistant.say(greeting, allow_interruptions=True)
-    
-    # ==========================================
-    # Interview Loop
-    # ==========================================
+    # CRITICAL DEBUG LOGGING
+    print(f"🔥 ENTRYPOINT CALLED! Room: {ctx.room.name}")
+    logger.info(f"🔥 ENTRYPOINT CALLED! Room: {ctx.room.name}")
     
     try:
-        # Wait for interview completion or timeout
-        await asyncio.wait_for(
-            assistant.aclose(),
-            timeout=settings.interview_max_duration_seconds
+        logger.info(f"🎤 Agent started for room: {ctx.room.name}")
+        print(f"🎤 Agent started for room: {ctx.room.name}")
+        
+        # Extract interview metadata
+        import json
+        logger.info("📦 Extracting metadata...")
+        print("📦 Extracting metadata...")
+        
+        metadata = ctx.job.room.metadata
+        if isinstance(metadata, str) and metadata.strip():
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON metadata: {metadata}")
+                metadata = {}
+        elif not metadata:
+            metadata = {}
+        
+        interview_id = metadata.get("interview_id", "unknown")
+        logger.info(f"📋 Interview ID: {interview_id}")
+        print(f"📋 Interview ID: {interview_id}")
+        
+        # Use default interview data (database loading disabled)
+        candidate_name = "Candidate"
+        job_title = "Software Engineer"
+        
+        # Build system prompt
+        system_prompt = f"""You are Ava, an AI technical recruiter conducting a phone interview for a {job_title} position.
+
+Your role:
+- Conduct a friendly, professional technical interview
+- Ask thoughtful questions about the candidate's experience
+- Listen actively and ask follow-up questions
+- Keep responses concise and natural
+
+Interview structure:
+1. Welcome the candidate warmly
+2. Ask about their background and experience
+3. Discuss specific technical skills
+4. Ask about past projects
+5. Answer any questions they have
+6. Thank them for their time
+
+Conversation style:
+- Be warm, professional, and encouraging
+- Keep responses to 2-3 sentences
+- Use natural language, avoid being robotic
+- Show genuine interest in their answers
+
+Start by greeting {candidate_name} and asking them to tell you about themselves."""
+
+        # Initialize components
+        logger.info("🔧 Initializing voice pipeline components...")
+        print("🔧 Initializing voice pipeline components...")
+        
+        # Speech-to-Text: Deepgram
+        print("📝 Creating Deepgram STT...")
+        stt = deepgram.STT(
+            model="nova-2",
+            language="en-US"
         )
-    except asyncio.TimeoutError:
-        logger.warning(f"Interview {interview_id} timed out")
-        await assistant.say("Thank you for your time. We've reached the end of our interview. Goodbye!")
-    
-    # ==========================================
-    # Save Interview Results
-    # ==========================================
-    
-    # Get conversation history
-    conversation_log = []
-    for msg in assistant.chat_ctx.messages:
-        conversation_log.append({
-            "role": msg.role,
-            "content": msg.content,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-    
-    # Extract full transcript text
-    full_transcript = "\n\n".join([
-        f"{msg.role.upper()}: {msg.content}"
-        for msg in assistant.chat_ctx.messages
-    ])
-    
-    # Compute evaluation (you can enhance this with more sophisticated analysis)
-    evaluation = await compute_evaluation(
-        conversation_log=conversation_log,
-        full_transcript=full_transcript,
-        session=session
-    )
-    
-    # Save to database (batch write)
-    call_duration = int((datetime.utcnow() - session.started_at).total_seconds())
-    
-    await complete_interview_session(
-        interview_id=interview_id,
-        evaluation=evaluation
-    )
-    
-    logger.info(f"Interview {interview_id} completed and saved")
+        print("✅ Deepgram STT created")
+        
+        # Text-to-Speech: OpenAI
+        print("🔊 Creating OpenAI TTS...")
+        tts = openai.TTS(
+            voice="alloy"  # Options: alloy, echo, fable, onyx, nova, shimmer
+        )
+        print("✅ OpenAI TTS created")
+        
+        # LLM: OpenAI
+        print("🧠 Creating OpenAI LLM...")
+        assistant_llm = openai.LLM(
+            model="gpt-4o-mini"
+        )
+        print("✅ OpenAI LLM created")
+        
+        # VAD: Silero
+        print("🎙️ Loading Silero VAD...")
+        vad = silero.VAD.load()
+        print("✅ Silero VAD loaded")
+        
+        logger.info("✅ Components initialized successfully")
+        print("✅ Components initialized successfully")
+        
+        # Create initial chat context
+        print("💬 Creating chat context...")
+        initial_ctx = llm.ChatContext()
+        initial_ctx.messages.append(
+            llm.ChatMessage(
+                role="system",
+                content=system_prompt
+            )
+        )
+        
+        logger.info("💬 Chat context created")
+        print("💬 Chat context created")
+        
+        # Create voice assistant
+        print("🤖 Creating voice assistant...")
+        assistant = voice_assistant.VoiceAssistant(
+            vad=vad,
+            stt=stt,
+            llm=assistant_llm,
+            tts=tts,
+            chat_ctx=initial_ctx
+        )
+        
+        logger.info("🤖 Voice assistant created")
+        print("🤖 Voice assistant created")
+        
+        # Connect to room first
+        print("🔗 Connecting to room...")
+        await ctx.connect()
+        logger.info("🔗 Connected to room")
+        print("🔗 Connected to room")
+        
+        # Start the assistant
+        print("🚀 Starting voice assistant...")
+        assistant.start(ctx.room)
+        
+        logger.info("🚀 Voice assistant started successfully!")
+        print("🚀 Voice assistant started successfully!")
+        logger.info(f"📞 Ready for interview {interview_id}")
+        
+        # Wait for SIP participant to join
+        print("⏳ Waiting for SIP participant to join...")
+        
+        @ctx.room.on("participant_connected")
+        def on_participant_connected(participant):
+            print(f"👤 Participant connected: {participant.identity}")
+            logger.info(f"👤 Participant connected: {participant.identity}")
+        
+        # Greeting - wait a bit for connection to stabilize
+        await asyncio.sleep(2.0)
+        
+        greeting = (
+            f"Hello! Thank you for taking the time to interview with us today. "
+            f"I'm Ava, and I'll be conducting your interview for the {job_title} position. "
+            f"This should take about 10 to 15 minutes. "
+            f"To start, could you please tell me a bit about yourself and your background?"
+        )
+        
+        print("👋 Sending greeting...")
+        await assistant.say(greeting, allow_interruptions=True)
+        
+        logger.info("👋 Greeting sent to candidate")
+        
+        # Wait for interview to complete
+        await asyncio.sleep(900)  # 15 minutes max
+        
+        # Wrap up
+        logger.info(f"✅ Interview {interview_id} completed")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in interview: {e}", exc_info=True)
+        raise
 
-
-# ==========================================
-# Helper Functions
-# ==========================================
-
-def build_interview_prompt(
-    candidate_data: Dict[str, Any],
-    jd_data: Dict[str, Any]
-) -> str:
-    """Build system prompt for interview agent"""
-    
-    candidate_name = candidate_data.get("name", "the candidate")
-    job_title = jd_data.get("title", "this position")
-    requirements = jd_data.get("requirements", [])
-    candidate_skills = candidate_data.get("skills", [])
-    candidate_projects = candidate_data.get("projects", [])
-    
-    prompt = f"""You are Ava, an AI technical recruiter conducting a phone interview for the {job_title} position.
-
-CANDIDATE INFORMATION:
-- Name: {candidate_name}
-- Skills: {', '.join(candidate_skills) if candidate_skills else 'Not specified'}
-- Past Projects: {' | '.join(candidate_projects[:3]) if candidate_projects else 'Not specified'}
-
-JOB REQUIREMENTS:
-{chr(10).join([f'- {req}' for req in requirements[:5]])}
-
-YOUR ROLE:
-You are conducting a {settings.interview_questions_count}-question technical interview. Your goal is to:
-1. Assess the candidate's technical skills and experience
-2. Evaluate cultural fit and communication skills
-3. Determine if they meet the job requirements
-
-INTERVIEW STRUCTURE:
-Ask {settings.interview_questions_count} questions total, covering:
-1. Technical background and experience
-2. Problem-solving abilities
-3. Specific skills mentioned in the JD
-4. Past project details
-5. Scenario-based questions
-6. Final thoughts and questions
-
-CONVERSATION STYLE:
-- Be professional yet warm and encouraging
-- Listen actively and ask follow-up questions when needed
-- Keep responses concise (2-3 sentences max)
-- Use natural acknowledgments: "I see", "That's interesting", "Tell me more"
-- If the candidate gives a short answer, probe deeper with "Can you elaborate on that?"
-- Track time: Aim for ~2 minutes per question
-
-IMPORTANT RULES:
-- ONE question at a time
-- Wait for complete answers before moving on
-- Don't rush the candidate
-- Don't interrupt with new questions
-- If they're struggling, offer to move to the next question
-- After {settings.interview_questions_count} questions, wrap up warmly
-
-Begin with a brief introduction, then start with question 1."""
-    
-    return prompt
-
-
-async def before_llm_callback(assistant: agents.VoiceAssistant, chat_ctx: agents.ChatContext):
-    """
-    Called before LLM generates response
-    Use this to track conversation progress
-    """
-    # Count questions asked
-    messages = chat_ctx.messages
-    
-    # Log for debugging
-    logger.debug(f"Messages so far: {len(messages)}")
-
-
-async def before_tts_callback(assistant: agents.VoiceAssistant, text: str):
-    """
-    Called before TTS converts text to speech
-    Use this to modify or log what the agent will say
-    """
-    logger.debug(f"Agent will say: {text[:100]}...")
-
-
-async def compute_evaluation(
-    conversation_log: list,
-    full_transcript: str,
-    session: Any
-) -> Dict[str, Any]:
-    """
-    Compute interview evaluation
-    
-    This is a simple version - you can enhance with:
-    - LLM-based analysis
-    - Skills extraction
-    - Sentiment analysis
-    - Answer quality scoring
-    """
-    
-    # Count questions
-    questions_asked = sum(1 for msg in conversation_log if msg["role"] == "assistant" and "?" in msg["content"])
-    answers_given = sum(1 for msg in conversation_log if msg["role"] == "user")
-    
-    # Simple scoring (enhance this!)
-    base_score = min(1.0, answers_given / settings.interview_questions_count)
-    
-    # Extract skills mentioned (simple keyword matching)
-    skills_discussed = []
-    for skill in session.candidate_data.get("skills", []):
-        if skill.lower() in full_transcript.lower():
-            skills_discussed.append(skill)
-    
-    evaluation = {
-        "score": base_score,
-        "sentiment_score": 0.5,  # Neutral (enhance with actual sentiment analysis)
-        "questions_asked": questions_asked,
-        "questions_completed": answers_given,
-        "summary": f"Candidate completed {answers_given} out of {settings.interview_questions_count} questions.",
-        "skills_discussed": skills_discussed,
-        "skills_coverage": {
-            "required": session.jd_data.get("requirements", []),
-            "demonstrated": skills_discussed,
-            "missing": list(set(session.jd_data.get("requirements", [])) - set(skills_discussed))
-        },
-        "fit_assessment": "Pending detailed review",
-        "keyword_matches": {}
-    }
-    
-    return evaluation
-
-
-# ==========================================
-# Worker Entry Point
-# ==========================================
 
 if __name__ == "__main__":
     # Configure logging

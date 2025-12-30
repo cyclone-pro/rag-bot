@@ -17,12 +17,12 @@ google-cloud-texttospeech==2.14.1
 google-cloud-storage==2.10.0
 
 # LLM & AI
-openai==1.6.1
+openai>=1.35.0,<2.0.0
 tiktoken==0.5.2
 
 # Embedding Model
 sentence-transformers==2.2.2
-torch==2.1.0
+torch>=2.2.0
 
 # Database
 sqlalchemy==2.0.23

@@ -55,7 +55,7 @@ def create_interview_collection():
         ),
         
         FieldSchema(
-            name="jd_id",
+            name="job_id",
             dtype=DataType.VARCHAR,
             max_length=64,
             description="Job description identifier"
@@ -158,8 +158,8 @@ def create_interview_collection():
     
     # JD ID index (for "show me all interviews for this position")
     collection.create_index(
-        field_name="jd_id",
-        index_name="idx_jd_id"
+        field_name="job_id",
+        index_name="idx_job_id"
     )
     
     # Date index (for time-range queries)

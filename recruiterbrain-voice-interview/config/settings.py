@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "recruiterbrain"
-    POSTGRES_USER: str = "recruiterbrain_user"
+    POSTGRES_USER: str = "backteam"
     POSTGRES_PASSWORD: str
     
     # Milvus

@@ -11,7 +11,7 @@ pydantic==2.5.0
 pydantic-settings==2.1.0
 
 # ===== LIVEKIT (Voice Infrastructure) =====
-livekit==0.11.1
+livekit==0.12.0
 livekit-agents==0.8.3
 livekit-plugins-deepgram==0.6.0
 livekit-plugins-google==0.6.0
@@ -29,7 +29,7 @@ pymilvus==2.3.4
 
 # ===== EMBEDDINGS (E5-Base-V2) =====
 sentence-transformers==2.2.2
-torch==2.1.0
+torch>=2.2.0
 transformers==4.35.2
 
 # ===== SPEECH SERVICES =====
@@ -41,7 +41,7 @@ google-cloud-texttospeech==2.16.0
 google-auth==2.25.2
 
 # ===== LLM & AI =====
-openai==1.6.1
+openai>=1.35.0,<2.0.0
 anthropic==0.8.1
 tiktoken==0.5.2
 

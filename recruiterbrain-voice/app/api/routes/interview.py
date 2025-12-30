@@ -7,6 +7,7 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Optional
+from app.services.telephony import make_interview_call
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from livekit import api
@@ -61,7 +62,8 @@ async def start_interview(
         # Step 1: Create LiveKit Room
         # ==========================================
         
-        room_name = f"interview-{interview_id}"
+        #room_name = f"interview-{interview_id}"
+        room_name = interview_id 
         
         # Initialize LiveKit API client
         livekit_api = api.LiveKitAPI(
@@ -110,17 +112,25 @@ async def start_interview(
         
         logger.info(f"Dispatched agent to room: {room_name}")
         
-        # ==========================================
-        # Step 4: Initiate Phone Call
-        # ==========================================
+        if settings.telnyx_api_key and settings.telnyx_phone_number:
+             logger.info(f"Initiating call to {request.candidate.phone_number}")
+             call_sid = await make_interview_call(
+                phone_number=request.candidate.phone_number,
+        livekit_room=room_name,
+        interview_id=interview_id
+    )
+             if call_sid:
+                 logger.info(f"Call initiated: {call_sid}")
+                 call_status = "calling"
+             else:
+                 logger.warning("Failed to initiate call")
+                 call_status = "failed"
+                 call_sid = None
         
-        # For now, this is a placeholder
-        # In production, you would:
-        # 1. Use Telnyx API to initiate call
-        # 2. Connect call to LiveKit SIP trunk
-        # 3. Get call SID from Telnyx
-        
-        call_sid = None  # Will be populated when Telnyx integration is complete
+        else:
+             logger.warning("Telnyx not configured - skipping phone call")
+             call_sid = None
+             call_status = "initiated"
         
         # Update status to "calling"
         await update_interview_status(
@@ -262,8 +272,8 @@ async def search_interviews(request: InterviewSearchRequest):
         if request.candidate_id:
             filter_expr.append(f'candidate_id == "{request.candidate_id}"')
         
-        if request.jd_id:
-            filter_expr.append(f'jd_id == "{request.jd_id}"')
+        if request.job_id:
+            filter_expr.append(f'job_id == "{request.job_id}"')
         
         if request.min_score is not None:
             filter_expr.append(f'evaluation_score >= {request.min_score}')
