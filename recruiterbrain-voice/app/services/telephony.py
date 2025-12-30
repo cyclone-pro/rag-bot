@@ -55,7 +55,7 @@ class TelephonyService:
                 # Pass the LiveKit room in client_state (must be base64)
                 client_state=client_state_b64,
                 # Webhook for call status updates
-                webhook_url=f"{settings.api_host}/api/v1/webhooks/telnyx",
+                webhook_url=f"{settings.api_public_base_url.rstrip('/')}/api/v1/webhooks/telnyx",
                 webhook_url_method="POST"
             )
             

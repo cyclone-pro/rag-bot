@@ -53,8 +53,7 @@ class Settings(BaseSettings):
     livekit_url: str
     livekit_api_key: str
     livekit_api_secret: str
-    livekit_sip_domain: str = "54jym8vfe6a.sip.livekit.cloud"
-    api_host: str = "http://localhost:8000"
+    livekit_sip_domain: str = "wysdsmxq.sip.livekit.cloud"
 
     # ===== DEEPGRAM =====
     deepgram_api_key: str
@@ -81,10 +80,11 @@ class Settings(BaseSettings):
     telnyx_connection_id: Optional[str] = None
     
     # ===== API =====
-    api_host: str = "0.0.0.0"
+    api_bind_host: str = "0.0.0.0"
     api_port: int = 8000
     api_workers: int = 4
     api_reload: bool = True
+    api_public_base_url: str = "http://localhost:8000"
     
     # CORS
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:8080"]

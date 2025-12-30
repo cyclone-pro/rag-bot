@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Database initialization failed")
     
     logger.info("✅ Database connections initialized")
-    logger.info(f"✅ Application started on {settings.api_host}:{settings.api_port}")
+    logger.info(f"✅ Application started on {settings.api_bind_host}:{settings.api_port}")
     
     yield
     
@@ -157,7 +157,7 @@ if __name__ == "__main__":
     
     uvicorn.run(
         "app.api.main:app",
-        host=settings.api_host,
+        host=settings.api_bind_host,
         port=settings.api_port,
         reload=settings.api_reload,
         workers=settings.api_workers if not settings.api_reload else 1,
