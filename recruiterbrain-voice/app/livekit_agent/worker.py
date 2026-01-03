@@ -55,7 +55,7 @@ async def entrypoint(ctx: JobContext):
         print(f"📋 Interview ID: {interview_id}")
         
         # Use default interview data (database loading disabled)
-        candidate_name = "Candidate"
+        candidate_name = "Atif"
         job_title = "Software Engineer"
         
         # Build system prompt
@@ -109,7 +109,9 @@ Start by greeting {candidate_name} and asking them to tell you about themselves.
         # Text-to-Speech: OpenAI
         print("🔊 Creating OpenAI TTS...")
         tts = openai.TTS(
-            voice="alloy"  # Options: alloy, echo, fable, onyx, nova, shimmer
+            voice="nova",
+            model="tts-1",
+            speed=0.9  # Options: alloy, echo, fable, onyx, nova, shimmer
         )
         print("✅ OpenAI TTS created")
         
