@@ -112,25 +112,59 @@ async def start_interview(
         
         logger.info(f"Dispatched agent to room: {room_name}")
         
-        if settings.telnyx_api_key and settings.telnyx_phone_number:
-             logger.info(f"Initiating call to {request.candidate.phone_number}")
-             call_sid = await make_interview_call(
-                phone_number=request.candidate.phone_number,
-        livekit_room=room_name,
-        interview_id=interview_id
-    )
-             if call_sid:
-                 logger.info(f"Call initiated: {call_sid}")
-                 call_status = "calling"
-             else:
-                 logger.warning("Failed to initiate call")
-                 call_status = "failed"
-                 call_sid = None
+  
+        # ==========================================
+        # Step 4: Create SIP Participant (LiveKit calls directly)
+        # ==========================================
         
+        # logger.info(f"Creating SIP participant to call {request.candidate.phone_number}")
+        
+        try:
+            # Create SIP participant - LiveKit dials out via Telnyx
+            sip_request = api.CreateSIPParticipantRequest(
+                sip_trunk_id=settings.livekit_outbound_trunk_id,
+                sip_call_to=request.candidate.phone_number,
+                room_name=room_name,
+                participant_identity=f"candidate-{interview_id}",
+                participant_name=request.candidate.name,
+                play_dialtone=True,  # Play dial tone while connecting
+            )
+            
+            sip_participant = await livekit_api.sip.create_sip_participant(sip_request)
+            
+            call_sid = sip_participant.sip_call_id
+            call_status = "calling"
+            
+            logger.info(f"✅ SIP participant created: {call_sid}")
+            logger.info(f"   LiveKit is calling {request.candidate.phone_number} via Telnyx")
+            
+        except Exception as e:
+            logger.error(f"Failed to create SIP participant: {e}")
+            call_sid = None
+            call_status = "failed"
+        """
+        logger.info(f"Initiating call to {request.candidate.phone_number}")
+        
+        if settings.telnyx_api_key and settings.telnyx_phone_number:
+            call_sid = await make_interview_call(
+                phone_number=request.candidate.phone_number,
+                livekit_room=room_name,
+                interview_id=interview_id
+            )
+            if call_sid:
+                logger.info(f"Call initiated: {call_sid}")
+                call_status = "calling"
+            else:
+                logger.warning("Failed to initiate call")
+                call_status = "failed"
+                call_sid = None
         else:
-             logger.warning("Telnyx not configured - skipping phone call")
-             call_sid = None
-             call_status = "initiated"
+            logger.warning("Telnyx not configured - skipping phone call")
+            call_sid = None
+            call_status = "initiated"
+        """
+
+     
         
         # Update status to "calling"
         await update_interview_status(

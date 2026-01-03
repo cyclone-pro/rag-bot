@@ -53,7 +53,10 @@ class Settings(BaseSettings):
     livekit_url: str
     livekit_api_key: str
     livekit_api_secret: str
-    livekit_sip_domain: str = "wysdsmxq.sip.livekit.cloud"
+    #livekit_sip_domain: str = "wysdsmxq.sip.livekit.cloud"
+    livekit_sip_domain:str ="54jym8vfe6a.sip.livekit.cloud"
+    livekit_outbound_trunk_id: str = Field(..., env="LIVEKIT_OUTBOUND_TRUNK_ID")
+    livekit_agent_name: str 
 
     # ===== DEEPGRAM =====
     deepgram_api_key: str
@@ -79,6 +82,12 @@ class Settings(BaseSettings):
     telnyx_phone_number: str
     telnyx_connection_id: Optional[str] = None
     
+    #=====Twillio=====
+
+    # Twilio Configuration (for SIP calling via LiveKit)
+    twilio_account_sid: Optional[str] = Field(default=None, env="TWILIO_ACCOUNT_SID")
+    twilio_auth_token: Optional[str] = Field(default=None, env="TWILIO_AUTH_TOKEN")
+    twilio_phone_number: Optional[str] = Field(default=None, env="TWILIO_PHONE_NUMBER")
     # ===== API =====
     api_bind_host: str = "0.0.0.0"
     api_port: int = 8000

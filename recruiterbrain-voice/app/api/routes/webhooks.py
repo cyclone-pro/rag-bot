@@ -45,16 +45,26 @@ async def telnyx_webhook(request: Request):
                 logger.error(f"Failed to decode client_state: {e}")
                 livekit_room = "default-room"
             
-            # Construct LiveKit SIP URI
+            # Construct LiveKit SIP URI (WITHOUT @ sign - Telnyx adds it)
+            # Format: sip:room_name@domain becomes just the room_name part
             livekit_sip_uri = f"sip:{livekit_room}@{settings.livekit_sip_domain}"
             
             logger.info(f"Bridging call {call_control_id} to {livekit_sip_uri}")
             
             try:
-                # Retrieve and transfer the call to LiveKit SIP
+                # Retrieve the call
                 telnyx.api_key = settings.telnyx_api_key
                 call = telnyx.Call.retrieve(call_control_id)
-                call.transfer(to=livekit_sip_uri)
+                
+                # Transfer with SIP authentication credentials
+                # These credentials tell Telnyx HOW to authenticate with LiveKit
+                call.transfer(
+                    to=livekit_sip_uri,
+                    # CRITICAL: Add SIP authentication for LiveKit
+                    # These should match your Telnyx FQDN connection credentials
+                    #sip_auth_username="Eiteisinc",  # Your FQDN connection username
+                    #sip_auth_password="LiveKit2025!Secure"  # Your FQDN connection password
+                )
                 
                 logger.info(f"✅ Call {call_control_id} successfully bridged to LiveKit room: {livekit_room}")
                 
