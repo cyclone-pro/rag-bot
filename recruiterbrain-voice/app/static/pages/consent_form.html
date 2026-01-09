@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interview Consent Form - RecruiterBrain</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 700px;
+            width: 100%;
+        }
+        
+        .consent-card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: #667eea;
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 16px;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error-message {
+            background: #fee;
+            border-left: 4px solid #f44;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+            color: #c00;
+        }
+        
+        .info-box {
+            background: #f0f7ff;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            margin-bottom: 30px;
+            border-radius: 4px;
+        }
+        
+        .info-box strong {
+            display: block;
+            margin-bottom: 10px;
+            color: #667eea;
+        }
+        
+        .consent-item {
+            background: #f9f9f9;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+            transition: all 0.3s ease;
+        }
+        
+        .consent-item:hover {
+            border-color: #667eea;
+            background: #f0f7ff;
+        }
+        
+        .consent-item.checked {
+            border-color: #667eea;
+            background: #f0f7ff;
+        }
+        
+        .consent-item label {
+            display: flex;
+            align-items: flex-start;
+            cursor: pointer;
+            user-select: none;
+        }
+        
+        .consent-item input[type="checkbox"] {
+            width: 24px;
+            height: 24px;
+            margin-right: 15px;
+            cursor: pointer;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+        
+        .consent-text {
+            flex: 1;
+        }
+        
+        .consent-text strong {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-size: 16px;
+        }
+        
+        .consent-text p {
+            color: #666;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        
+        .legal-text {
+            background: #f9f9f9;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 30px 0;
+            font-size: 13px;
+            color: #666;
+            line-height: 1.8;
+        }
+        
+        .submit-section {
+            margin-top: 30px;
+            text-align: center;
+        }
+        
+        .submit-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 16px 40px;
+            font-size: 18px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .submit-btn:hover:not(:disabled) {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+        
+        .submit-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        
+        .success-message {
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .success-icon {
+            font-size: 64px;
+            color: #4caf50;
+            margin-bottom: 20px;
+        }
+        
+        .success-message h2 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .success-message p {
+            color: #666;
+        }
+        
+        .footer {
+            background: #f9f9f9;
+            padding: 20px;
+            text-align: center;
+            font-size: 12px;
+            color: #999;
+        }
+        
+        @media (max-width: 600px) {
+            .content {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 24px;
+            }
+            
+            .consent-item {
+                padding: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="consent-card">
+            <div class="header">
+                <h1>🎙️ Interview Consent Form</h1>
+                <p id="headerSubtitle">Please review and provide your consent</p>
+            </div>
+            
+            <div class="content">
+                <!-- Loading State -->
+                <div id="loadingState" class="loading">
+                    <div class="spinner"></div>
+                    <p>Verifying consent link...</p>
+                </div>
+                
+                <!-- Error State -->
+                <div id="errorState" style="display: none;">
+                    <div class="error-message">
+                        <strong>⚠️ Error</strong>
+                        <p id="errorMessage"></p>
+                    </div>
+                </div>
+                
+                <!-- Consent Form -->
+                <div id="consentForm" style="display: none;">
+                    <div class="info-box">
+                        <strong>Before Your Interview</strong>
+                        <p>We need your consent to proceed with your AI-powered voice interview. 
+                        Please read and agree to each item below. This is required by privacy 
+                        regulations (GDPR, CCPA) to protect your rights.</p>
+                    </div>
+                    
+                    <form id="form">
+                        <!-- Consent items will be inserted here -->
+                        <div id="consentItems"></div>
+                        
+                        <div class="legal-text">
+                            <strong>Your Rights:</strong>
+                            <ul style="margin-left: 20px; margin-top: 10px;">
+                                <li>You may withdraw your consent at any time</li>
+                                <li>You can request deletion of your data</li>
+                                <li>You can request a copy of your data</li>
+                                <li>You can object to automated decision-making</li>
+                            </ul>
+                            <p style="margin-top: 15px;">
+                                Your data will be automatically deleted after 90 days. 
+                                For questions, contact: privacy@recruiterbrain.com
+                            </p>
+                        </div>
+                        
+                        <div class="submit-section">
+                            <button type="button" class="submit-btn" id="submitBtn" disabled>
+                                I Agree - Submit Consent
+                            </button>
+                            <p id="statusMessage" style="margin-top: 15px; color: #667eea; font-weight: 600;"></p>
+                        </div>
+                    </form>
+                </div>
+                
+                <!-- Success State -->
+                <div id="successState" style="display: none;">
+                    <div class="success-message">
+                        <div class="success-icon">✅</div>
+                        <h2>Consent Submitted Successfully!</h2>
+                        <p>Thank you for providing your consent. You will receive an interview 
+                        call from us shortly.</p>
+                        <p style="margin-top: 20px; color: #999;">You can close this window now.</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="footer">
+                <p>© 2026 RecruiterBrain. All rights reserved. | 
+                   <a href="/privacy" style="color: #667eea;">Privacy Policy</a> | 
+                   <a href="/terms" style="color: #667eea;">Terms of Service</a>
+                </p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Configuration
+        const API_BASE = window.location.origin + '/api/v1/consent';
+        
+        // Get token from URL
+        const token = window.location.pathname.split('/').pop();
+        
+        // Consent type descriptions
+        const CONSENT_DESCRIPTIONS = {
+            'interview_participation': {
+                title: 'Participate in AI Interview',
+                description: 'I consent to participate in an AI-powered voice interview conducted by RecruiterBrain.'
+            },
+            'call_recording': {
+                title: 'Call Recording',
+                description: 'I consent to my interview call being recorded for quality assurance and evaluation purposes.'
+            },
+            'data_processing': {
+                title: 'Data Processing',
+                description: 'I consent to my voice data and responses being processed and analyzed by AI systems.'
+            },
+            'ai_evaluation': {
+                title: 'AI Evaluation',
+                description: 'I consent to artificial intelligence analyzing my responses to assess my qualifications.'
+            }
+        };
+        
+        // State
+        let consentData = {};
+        
+        // Initialize
+        async function init() {
+            try {
+                // Verify token
+                const response = await fetch(`${API_BASE}/verify/${token}`);
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    showError(data.detail || 'Invalid or expired consent link');
+                    return;
+                }
+                
+                // Update header
+                document.getElementById('headerSubtitle').textContent = 
+                    `${data.candidate_name} - ${data.job_title}`;
+                
+                // Parse consents requested
+                const consentsRequested = JSON.parse(data.consents_requested || '[]');
+                
+                // Build consent items
+                buildConsentItems(consentsRequested);
+                
+                // Show form
+                document.getElementById('loadingState').style.display = 'none';
+                document.getElementById('consentForm').style.display = 'block';
+                
+            } catch (error) {
+                console.error('Init error:', error);
+                showError('Failed to load consent form. Please try again or contact support.');
+            }
+        }
+        
+        function buildConsentItems(consents) {
+            const container = document.getElementById('consentItems');
+            
+            consents.forEach(consentType => {
+                const info = CONSENT_DESCRIPTIONS[consentType] || {
+                    title: consentType.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+                    description: `I consent to ${consentType.replace(/_/g, ' ')}.`
+                };
+                
+                const div = document.createElement('div');
+                div.className = 'consent-item';
+                div.innerHTML = `
+                    <label>
+                        <input type="checkbox" 
+                               id="consent_${consentType}" 
+                               data-consent-type="${consentType}"
+                               required>
+                        <div class="consent-text">
+                            <strong>${info.title}</strong>
+                            <p>${info.description}</p>
+                        </div>
+                    </label>
+                `;
+                
+                container.appendChild(div);
+                
+                // Add event listener
+                const checkbox = div.querySelector('input');
+                checkbox.addEventListener('change', handleCheckboxChange);
+            });
+        }
+        
+        function handleCheckboxChange(e) {
+            const item = e.target.closest('.consent-item');
+            
+            if (e.target.checked) {
+                item.classList.add('checked');
+            } else {
+                item.classList.remove('checked');
+            }
+            
+            // Check if all checkboxes are checked
+            const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+            const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+            
+            document.getElementById('submitBtn').disabled = !allChecked;
+        }
+        
+        async function submitConsent() {
+            const submitBtn = document.getElementById('submitBtn');
+            const statusMessage = document.getElementById('statusMessage');
+            
+            try {
+                // Disable button
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Submitting...';
+                statusMessage.textContent = '⏳ Saving your consent...';
+                
+                // Collect consents
+                const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+                const consents = {};
+                
+                checkboxes.forEach(cb => {
+                    const consentType = cb.dataset.consentType;
+                    consents[consentType] = cb.checked;
+                });
+                
+                // Collect device info
+                const deviceInfo = {
+                    user_agent: navigator.userAgent,
+                    screen_resolution: `${screen.width}x${screen.height}`,
+                    language: navigator.language,
+                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+                };
+                
+                // Submit to API
+                const response = await fetch(`${API_BASE}/submit`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        token: token,
+                        consents: consents,
+                        device_info: deviceInfo
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(result.detail || 'Submission failed');
+                }
+                
+                // Show success
+                document.getElementById('consentForm').style.display = 'none';
+                document.getElementById('successState').style.display = 'block';
+                
+            } catch (error) {
+                console.error('Submit error:', error);
+                statusMessage.textContent = '❌ ' + error.message;
+                statusMessage.style.color = '#f44';
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'I Agree - Submit Consent';
+            }
+        }
+        
+        function showError(message) {
+            document.getElementById('loadingState').style.display = 'none';
+            document.getElementById('errorState').style.display = 'block';
+            document.getElementById('errorMessage').textContent = message;
+        }
+        
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', init);
+        document.getElementById('submitBtn').addEventListener('click', submitConsent);
+    </script>
+</body>
+</html>

@@ -23,6 +23,9 @@ class CandidateData(BaseModel):
     projects: List[str] = Field(default_factory=list, description="List of past projects")
     skills: List[str] = Field(default_factory=list, description="Technical skills")
     experience_years: Optional[int] = Field(None, ge=0, le=50)
+    current_company: Optional[str] = Field(None, max_length=200, description="Current employer")
+    resume_summary: Optional[str] = Field(None, max_length=1000, description="Brief resume summary")
+    
     
     # Metadata
     timezone: str = Field(default="UTC", description="Candidate timezone")

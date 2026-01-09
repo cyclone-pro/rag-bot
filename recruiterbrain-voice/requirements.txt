@@ -31,6 +31,7 @@ pymilvus==2.3.4
 sentence-transformers==2.2.2
 torch>=2.2.0
 transformers==4.35.2
+huggingface-hub==0.16.4
 
 # ===== SPEECH SERVICES =====
 # Deepgram STT
@@ -47,6 +48,7 @@ tiktoken==0.5.2
 
 # ===== TELEPHONY =====
 telnyx==2.1.1
+twilio>=9.0.0
 
 # ===== ASYNC & CONCURRENCY =====
 aiohttp==3.9.1

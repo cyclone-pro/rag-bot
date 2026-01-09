@@ -8,8 +8,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.api.routes import webhooks
-
+from app.api.routes import webhooks,interview, consent
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+import os
 from app.config.settings import settings
 from app.services.database import (
     initialize_database_connections,

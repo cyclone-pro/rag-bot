@@ -15,7 +15,7 @@ class EmbeddingService:
     
     def __init__(self):
         self.model = None
-        self._load_model()
+       # self._load_model()
     
     def _load_model(self):
         """Lazy load the embedding model"""
@@ -35,6 +35,7 @@ class EmbeddingService:
         Returns:
             List of 768 floats
         """
+        self._ensure_loaded()
         # E5 models require prefix
         prefixed_text = f"{prefix}: {text}"
         

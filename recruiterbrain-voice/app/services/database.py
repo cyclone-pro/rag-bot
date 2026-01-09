@@ -53,18 +53,21 @@ AsyncSessionLocal = async_sessionmaker(
 
 
 @asynccontextmanager
-async def get_db_session():
-    """Get database session with automatic cleanup"""
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception as e:
-            await session.rollback()
-            logger.error(f"Database error: {e}")
-            raise
-        finally:
-            await session.close()
+async def get_db_connection():
+    """Get raw asyncpg connection for direct SQL execution"""
+    import asyncpg
+    
+    conn = await asyncpg.connect(
+        host=settings.postgres_host,
+        port=settings.postgres_port,
+        database=settings.postgres_db,
+        user=settings.postgres_user,
+        password=settings.postgres_password
+    )
+    try:
+        yield conn
+    finally:
+        await conn.close()
 
 
 # ============================================

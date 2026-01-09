@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_db: str = "recruiterbrain"
-    postgres_user: str
+    postgres_user: str = "backteam"
     postgres_password: str
     
     # Connection Pooling

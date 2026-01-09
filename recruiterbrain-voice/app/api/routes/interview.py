@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 from app.services.telephony import make_interview_call
-
+import json
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from livekit import api
 
@@ -27,6 +27,53 @@ from app.services.database import update_interview_status
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ==========================================
+# Background Processing Function
+# ==========================================
+
+async def process_completed_interview(interview_id: str):
+    """Background task to process interview after it completes"""
+    import asyncio
+    from app.services.transcript_processor import process_interview_transcript
+    from app.services.database import get_db_session
+    from sqlalchemy import text
+    
+    logger.info(f"🔄 Background processor started for {interview_id}")
+    
+    # Wait for interview to complete
+    max_wait = 900  # 15 minutes
+    waited = 0
+    
+    while waited < max_wait:
+        await asyncio.sleep(10)  # Check every 10 seconds
+        waited += 10
+        
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    text("SELECT interview_status, conversation_log FROM interviews WHERE interview_id = :id"),
+                    {"id": interview_id}
+                )
+                row = result.fetchone()
+                
+                if row and row.interview_status == 'processing' and row.conversation_log:
+                    # Interview finished, process it
+                    logger.info(f"🔄 Processing interview {interview_id}")
+                    await process_interview_transcript(interview_id, row.conversation_log)
+                    logger.info(f"✅ Background processing complete for {interview_id}")
+                    break
+                elif row and row.interview_status == 'completed':
+                    # Already processed
+                    logger.info(f"✓ Interview {interview_id} already processed")
+                    break
+        except Exception as e:
+            logger.error(f"Error in background processor: {e}")
+            await asyncio.sleep(5)  # Wait a bit before retrying
+    
+    if waited >= max_wait:
+        logger.warning(f"⏰ Timeout waiting for interview {interview_id}")
 
 
 # ==========================================
@@ -62,7 +109,6 @@ async def start_interview(
         # Step 1: Create LiveKit Room
         # ==========================================
         
-        #room_name = f"interview-{interview_id}"
         room_name = interview_id 
         
         # Initialize LiveKit API client
@@ -78,7 +124,29 @@ async def start_interview(
                 name=room_name,
                 empty_timeout=settings.interview_max_duration_seconds + 300,  # Buffer
                 max_participants=2,  # Agent + candidate
-                metadata=f'{{"interview_id": "{interview_id}"}}'
+                metadata=json.dumps({
+                    "interview_id": interview_id,
+                    "candidate": {
+                        "candidate_id": request.candidate.candidate_id,
+                        "name": request.candidate.name,
+                        "email": request.candidate.email,
+                        "phone_number": request.candidate.phone_number,
+                        "current_company": getattr(request.candidate, "current_company", "your company"),
+                        "resume_summary": getattr(request.candidate, "resume_summary", "your background"),
+                        "skills": request.candidate.skills,
+                        "projects": request.candidate.projects,
+                        "experience_years": request.candidate.experience_years
+                    },
+                    "job": {
+                        "job_id": request.job_description.job_id,
+                        "title": request.job_description.title,
+                        "description": request.job_description.description or "this position",
+                        "requirements": request.job_description.requirements,
+                        "preferred_skills": getattr(request.job_description, "preferred_skills", []),
+                        "location": getattr(request.job_description, "location", None),
+                        "remote_ok": getattr(request.job_description, "remote_ok", False)
+                    }
+                })
             )
         )
         
@@ -106,18 +174,15 @@ async def start_interview(
             api.CreateAgentDispatchRequest(
                 room=room_name,
                 agent_name="interview-agent",
-                metadata=f'{{"interview_id": "{interview_id}"}}'
+                metadata=json.dumps({"interview_id": interview_id})
             )
         )
         
         logger.info(f"Dispatched agent to room: {room_name}")
         
-  
         # ==========================================
         # Step 4: Create SIP Participant (LiveKit calls directly)
         # ==========================================
-        
-        # logger.info(f"Creating SIP participant to call {request.candidate.phone_number}")
         
         try:
             # Create SIP participant - LiveKit dials out via Telnyx
@@ -142,29 +207,6 @@ async def start_interview(
             logger.error(f"Failed to create SIP participant: {e}")
             call_sid = None
             call_status = "failed"
-        """
-        logger.info(f"Initiating call to {request.candidate.phone_number}")
-        
-        if settings.telnyx_api_key and settings.telnyx_phone_number:
-            call_sid = await make_interview_call(
-                phone_number=request.candidate.phone_number,
-                livekit_room=room_name,
-                interview_id=interview_id
-            )
-            if call_sid:
-                logger.info(f"Call initiated: {call_sid}")
-                call_status = "calling"
-            else:
-                logger.warning("Failed to initiate call")
-                call_status = "failed"
-                call_sid = None
-        else:
-            logger.warning("Telnyx not configured - skipping phone call")
-            call_sid = None
-            call_status = "initiated"
-        """
-
-     
         
         # Update status to "calling"
         await update_interview_status(
@@ -174,6 +216,10 @@ async def start_interview(
             livekit_room_name=room_name,
             worker_id=agent_dispatch.agent_id if hasattr(agent_dispatch, 'agent_id') else None
         )
+        
+        # Add background task to process interview after completion
+        background_tasks.add_task(process_completed_interview, interview_id)
+        logger.info(f"📋 Background processor scheduled for {interview_id}")
         
         # ==========================================
         # Return Response
