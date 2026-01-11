@@ -13,7 +13,7 @@ from app.utils.keyword_extractor import extract_keywords
 from app.services.embedding_service import get_embedding_service
 from app.services.milvus_service import get_milvus_service
 from app.services.database import get_db_session
-from sqlalchemy import text
+from sqlalchemy import text,cast
 
 logger = logging.getLogger(__name__)
 
@@ -219,11 +219,11 @@ async def save_to_database(
         query = text("""
             UPDATE interviews
             SET 
-                conversation_log = :conversation_log::jsonb,
+                conversation_log = CAST(:conversation_log AS jsonb),
                 full_transcript = :full_transcript,
                 interview_status = 'completed',
                 sentiment_score = :sentiment_score,
-                keyword_matches = :keyword_matches::jsonb,
+                keyword_matches = CAST(:keyword_matches AS jsonb),
                 call_duration_seconds = :duration,
                 completed_at = NOW(),
                 updated_at = NOW()
@@ -267,7 +267,7 @@ async def save_basic_transcript(
         query = text("""
             UPDATE interviews
             SET 
-                conversation_log = :conversation_log::jsonb,
+                conversation_log = CAST(:conversation_log AS jsonb),
                 full_transcript = :full_transcript,
                 interview_status = 'completed',
                 call_duration_seconds = :duration,
@@ -293,7 +293,7 @@ async def refresh_materialized_view():
     """Refresh the interview_qa_flat materialized view"""
     try:
         async with get_db_session() as session:
-            await session.execute(text("REFRESH MATERIALIZED VIEW CONCURRENTLY interview_qa_flat"))
+            await session.execute(text("REFRESH MATERIALIZED VIEW  interview_qa_flat"))
             logger.info("✅ Refreshed materialized view")
     except Exception as e:
         logger.warning(f"⚠️  Failed to refresh materialized view: {e}")

@@ -105,6 +105,19 @@ app.include_router(
 )
 
 app.include_router(webhooks.router, prefix="/api/v1", tags=["webhooks"])
+# Serve consent page
+@app.get("/consent/{token}")
+async def serve_consent_page(token: str):
+    return FileResponse("app/static/pages/consent_form.html")
+app.include_router(
+    consent.router,
+    prefix="/api/v1/consent",
+    tags=["consent"]
+)
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
 
 # ==========================================
 # Root Endpoints

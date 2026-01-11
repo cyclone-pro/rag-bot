@@ -321,13 +321,13 @@ async def save_interview_completion(
                     call_duration_seconds = :call_duration_seconds,
                     
                     -- Your conversation columns
-                    conversation_log = :conversation_log::jsonb,
+                    conversation_log = CAST(:conversation_log AS jsonb),
                     full_transcript = :full_transcript,
                     
                     -- Evaluation results
                     evaluation_score = :evaluation_score,
                     sentiment_score = :sentiment_score,
-                    keyword_matches = :keyword_matches::jsonb,
+                    keyword_matches = CAST(:keyword_matches AS jsonb),
                     fit_assessment = :fit_assessment,
                     
                     -- Recording

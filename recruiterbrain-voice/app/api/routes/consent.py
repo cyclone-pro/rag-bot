@@ -194,7 +194,7 @@ async def send_consent_request(
         token = secrets.token_urlsafe(32)
         
         # Generate consent form URL
-        consent_url = f"{settings.app_base_url}/consent/{token}"
+        consent_url = f"{settings.api_public_base_url}/consent/{token}"
         
         # Consent text (legal language)
         consent_text = """
@@ -216,8 +216,8 @@ By consenting, you agree to the following:
    - Request a copy of your data
    - Object to automated decision-making
 
-For more information, see our Privacy Policy at {app_base_url}/privacy
-        """.format(app_base_url=settings.app_base_url)
+For more information, see our Privacy Policy at {api_public_base_url}/privacy
+        """.format(api_public_base_url=settings.api_public_base_url)
         
         # Use connection pooling properly - single session for all queries
         async with get_db_session() as session:
