@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     
     # ===== DATABASE - POSTGRESQL =====
-    postgres_host: str = "localhost"
+    postgres_host: str 
     postgres_port: int = 5432
-    postgres_db: str = "recruiterbrain"
+    postgres_db: str = "recruiter_brain"
     postgres_user: str = "backteam"
     postgres_password: str
     
@@ -39,7 +39,7 @@ class Settings(BaseSettings):
         )
     
     # ===== DATABASE - MILVUS =====
-    milvus_host: str = "localhost"
+    milvus_host: str 
     milvus_port: int = 19530
     milvus_collection: str = "interview_transcripts_v2"
     milvus_pool_size: int = 10
@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     twilio_account_sid: Optional[str] = Field(default=None, env="TWILIO_ACCOUNT_SID")
     twilio_auth_token: Optional[str] = Field(default=None, env="TWILIO_AUTH_TOKEN")
     twilio_phone_number: Optional[str] = Field(default=None, env="TWILIO_PHONE_NUMBER")
+
+    #=====mail sender =====
+    email_from: str = "noreply@recruiterbrain.com"
+    
+    
     # ===== API =====
     api_bind_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -124,7 +129,7 @@ class Settings(BaseSettings):
     # ===== MONITORING =====
     sentry_dsn: Optional[str] = None
     prometheus_port: int = 9090
-    
+     
     # ===== FEATURE FLAGS =====
     enable_recording: bool = True
     enable_consent_check: bool = True

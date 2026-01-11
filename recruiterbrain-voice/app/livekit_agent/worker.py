@@ -146,8 +146,8 @@ async def entrypoint(ctx: JobContext):
         
         tts = openai.TTS(
             voice="nova",  # Warm, professional female voice
-            model="tts-1-hd",  # HD model for better quality
-            speed=0.9  # Slightly slower for clarity
+            model="tts-1",  
+            speed=1.0  
         )
         
         assistant_llm = openai.LLM(model="gpt-4o-mini")
@@ -199,24 +199,37 @@ async def entrypoint(ctx: JobContext):
             
             print(f"💬 Turn {turns_count}: {msg.content[:60]}...")
             
-            # Detect goodbye phrases
-            goodbye_phrases = [
-                "thank you for your time",
-                "we'll be in touch",
-                "have a great day",
-                "thanks for speaking",
-                "appreciate you speaking",
-                "we'll reach out",
-                "hear back from us",
-                "that concludes",
-                "best of luck"
-            ]
+            # STRICT goodbye detection - requires ALL 3 conditions
+            content_lower = msg.content.lower()
             
-            if any(phrase in msg.content.lower() for phrase in goodbye_phrases):
-                print(f"👋 Detected goodbye - will end soon")
+            # Condition 1: Has SPECIFIC goodbye phrase (not generic)
+            specific_goodbye = any(phrase in content_lower for phrase in [
+                "thank you so much for your time today",
+                "thanks for your time today",
+                "thank you for speaking with me today",
+                "i really enjoyed learning about your work",
+                "the team will review our conversation",
+                "we'll be in touch soon"
+            ])
+            
+            # Condition 2: Has final greeting
+            final_greeting = any(phrase in content_lower for phrase in [
+                "have a great day",
+                "take care",
+                "goodbye",
+               
+            ])
+            
+            # Condition 3: Enough turns (at least 8 complete exchanges)
+            enough_turns = turns_count >= 8
+            
+            # ALL THREE conditions must be met
+            if specific_goodbye and final_greeting and enough_turns:
+                print(f"👋 Detected goodbye (turn {turns_count}, duration: {asyncio.get_event_loop().time() - start_time:.1f}s)")
                 interview_ending = True
                 goodbye_detected_time = asyncio.get_event_loop().time()
-        
+            elif final_greeting and not specific_goodbye:
+                print(f"   ℹ️  Casual greeting at turn {turns_count} (not ending)")
         # Wait for SIP participant to join
         print("📞 Waiting for SIP participant to join room...")
         max_wait = 60
@@ -336,8 +349,8 @@ async def entrypoint(ctx: JobContext):
             import asyncpg
             
             conn = await asyncpg.connect(
-                host="localhost",
-                database="recruiterbrain",
+                host=settings.postgres_host,
+                database=settings.postgres_db,
                 user="backteam",
                 password=settings.postgres_password
             )

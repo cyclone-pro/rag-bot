@@ -51,7 +51,22 @@ AsyncSessionLocal = async_sessionmaker(
     autocommit=False
 )
 
-
+@asynccontextmanager
+async def get_db_session():
+    """
+    Get database session with automatic cleanup
+    Used for: SQLAlchemy ORM operations with text() queries
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Database error: {e}")
+            raise
+        finally:
+            await session.close()
 @asynccontextmanager
 async def get_db_connection():
     """Get raw asyncpg connection for direct SQL execution"""
