@@ -248,7 +248,7 @@ async def entrypoint(ctx: JobContext):
         print("📞 Participant joined. Waiting for call to be answered...")
         participant = list(ctx.room.remote_participants.values())[0]
         
-        max_wait_audio = 30
+        max_wait_audio = 60
         waited_audio = 0
         
         while len(participant.track_publications) == 0 and waited_audio < max_wait_audio:
@@ -262,7 +262,8 @@ async def entrypoint(ctx: JobContext):
         
         # Candidate answered! Short wait for audio to stabilize
         print("✅ Candidate answered!")
-        await asyncio.sleep(0.5)
+        print("⏳ Waiting 2 seconds for call stabilization...")
+        await asyncio.sleep(1.5)
 
         # Send personalized greeting
         greeting = (
