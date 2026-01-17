@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 env/
 venv/
+video_avatar/agent/
 rag3/
 
 # VSCode

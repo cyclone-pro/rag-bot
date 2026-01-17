@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Avatar Call</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&family=Newsreader:opsz,wght@6..72,500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --ink: #f6f2ea;
+        --muted: #b8b1a6;
+        --accent: #c9643b;
+        --panel: #1e1b17;
+        --panel-border: #2d2823;
+      }
+      body {
+        margin: 0;
+        font-family: "Space Grotesk", "Newsreader", sans-serif;
+        background: radial-gradient(circle at top, #2b2722, #0f0d0b 65%);
+        color: var(--ink);
+      }
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--panel-border);
+      }
+      .status {
+        flex: 1;
+        font-size: 14px;
+        color: var(--muted);
+      }
+      .button {
+        background: var(--accent);
+        color: #ffffff;
+        border: none;
+        padding: 8px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .button.secondary {
+        background: #2f2a24;
+      }
+      .video-wrap {
+        display: grid;
+        place-items: center;
+        height: calc(100vh - 56px);
+        background: radial-gradient(circle at center, #24201b, #0d0b09);
+      }
+      video {
+        width: min(960px, 100%);
+        max-height: 85vh;
+        border-radius: 16px;
+        background: #0c0b0a;
+      }
+      .hint {
+        position: fixed;
+        bottom: 12px;
+        right: 16px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+  </head>
+  <body>
+    <div class="toolbar">
+      <div class="status" id="status">Preparing call...</div>
+      <button class="button secondary" id="mute-btn">Mute</button>
+      <button class="button" id="end-btn">End Call</button>
+    </div>
+    <div class="video-wrap">
+      <video id="remote-video" autoplay playsinline></video>
+    </div>
+    <div class="hint" id="hint"></div>
+
+    <script>
+      const statusEl = document.getElementById("status");
+      const hintEl = document.getElementById("hint");
+      const muteBtn = document.getElementById("mute-btn");
+      const endBtn = document.getElementById("end-btn");
+      const videoEl = document.getElementById("remote-video");
+
+      const params = new URLSearchParams(window.location.search);
+      const livekitUrl = params.get("livekit_url") || localStorage.getItem("livekit_url");
+      const livekitToken = params.get("livekit_token") || localStorage.getItem("livekit_token");
+      const callId = params.get("call_id") || localStorage.getItem("livekit_call_id");
+
+      let room = null;
+      let micEnabled = true;
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function setHint(text) {
+        hintEl.textContent = text || "";
+      }
+
+      async function connectCall() {
+        if (!livekitUrl || !livekitToken) {
+          setStatus("Missing LiveKit credentials.");
+          setHint("Open the launcher and rerun create.py for a fresh call.");
+          return;
+        }
+
+        if (!window.LivekitClient) {
+          setStatus("LiveKit client failed to load.");
+          return;
+        }
+
+        const { Room } = window.LivekitClient;
+        room = new Room({ adaptiveStream: true, dynacast: true });
+
+        room.on("connectionStateChanged", (state) => {
+          setStatus(`Connection: ${state}`);
+        });
+
+        room.on("trackSubscribed", (track) => {
+          if (track.kind === "video") {
+            track.attach(videoEl);
+          }
+          if (track.kind === "audio") {
+            const audioEl = track.attach();
+            audioEl.autoplay = true;
+            document.body.appendChild(audioEl);
+          }
+        });
+
+        room.on("disconnected", () => {
+          setStatus("Disconnected.");
+        });
+
+        setStatus("Connecting...");
+        await room.connect(livekitUrl, livekitToken);
+        setStatus("Connected.");
+        if (callId) {
+          setHint(`Call ID: ${callId}`);
+        }
+
+        try {
+          await room.localParticipant.setMicrophoneEnabled(true);
+          micEnabled = true;
+          muteBtn.textContent = "Mute";
+        } catch (err) {
+          setHint("Mic permission not granted.");
+        }
+      }
+
+      muteBtn.addEventListener("click", async () => {
+        if (!room) return;
+        micEnabled = !micEnabled;
+        await room.localParticipant.setMicrophoneEnabled(micEnabled);
+        muteBtn.textContent = micEnabled ? "Mute" : "Unmute";
+      });
+
+      endBtn.addEventListener("click", () => {
+        if (room) {
+          room.disconnect();
+        }
+        window.close();
+      });
+
+      connectCall();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ava Intake Launcher</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&family=Newsreader:opsz,wght@6..72,500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg-1: #f4efe6;
+        --bg-2: #efe1cb;
+        --ink: #1b1914;
+        --muted: #6b6256;
+        --accent: #c9643b;
+        --accent-dark: #7a341e;
+        --ring: rgba(201, 100, 59, 0.35);
+      }
+      body {
+        margin: 0;
+        font-family: "Space Grotesk", "Newsreader", sans-serif;
+        color: var(--ink);
+        background: radial-gradient(circle at top, #fff8ee, var(--bg-1) 45%, var(--bg-2));
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+      }
+      .card {
+        width: min(640px, 92vw);
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid #e5d9c6;
+        border-radius: 24px;
+        padding: 28px;
+        box-shadow: 0 24px 60px rgba(53, 44, 31, 0.16);
+        position: relative;
+        overflow: hidden;
+      }
+      .card::after {
+        content: "";
+        position: absolute;
+        inset: -40% -20% auto auto;
+        width: 280px;
+        height: 280px;
+        background: radial-gradient(circle, rgba(201, 100, 59, 0.3), transparent 70%);
+        pointer-events: none;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      h1 {
+        font-family: "Newsreader", serif;
+        font-size: 28px;
+        margin: 10px 0 8px;
+      }
+      p {
+        margin: 0 0 20px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .launch {
+        display: grid;
+        place-items: center;
+        margin: 24px 0 10px;
+      }
+      .avatar-btn {
+        width: 148px;
+        height: 148px;
+        border-radius: 50%;
+        border: none;
+        background: radial-gradient(circle at 30% 30%, #f5d2b6, #c9643b);
+        color: #ffffff;
+        font-size: 42px;
+        font-weight: 600;
+        cursor: pointer;
+        position: relative;
+        box-shadow: 0 16px 40px rgba(122, 52, 30, 0.35);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+      }
+      .avatar-btn::before {
+        content: "";
+        position: absolute;
+        inset: -10px;
+        border-radius: 50%;
+        border: 2px solid var(--ring);
+        animation: pulse 2.2s infinite;
+      }
+      .avatar-btn:hover {
+        transform: translateY(-2px) scale(1.02);
+        box-shadow: 0 18px 45px rgba(122, 52, 30, 0.4);
+      }
+      .status {
+        margin-top: 12px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .hint {
+        font-size: 12px;
+        margin-top: 6px;
+        color: #8b7d6d;
+      }
+      @keyframes pulse {
+        0% {
+          transform: scale(0.9);
+          opacity: 0.6;
+        }
+        70% {
+          transform: scale(1.05);
+          opacity: 0;
+        }
+        100% {
+          transform: scale(0.9);
+          opacity: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="badge">Live intake</div>
+      <h1>Launch the vendor intake call</h1>
+      <p>
+        Click the avatar to open a new tab with the LiveKit session. This page
+        loads call credentials from <code>static/latest_call.json</code>.
+      </p>
+      <div class="launch">
+        <button id="avatar-btn" class="avatar-btn" aria-label="Start call">A</button>
+      </div>
+      <div class="status" id="status">Waiting for latest_call.json.</div>
+      <div class="hint" id="hint"></div>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById("status");
+      const hintEl = document.getElementById("hint");
+      const avatarBtn = document.getElementById("avatar-btn");
+      let callData = null;
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function setHint(text) {
+        hintEl.textContent = text || "";
+      }
+
+      function extractCall(data) {
+        const call = data && typeof data === "object" ? data.call || data : null;
+        if (!call || !call.livekit_url || !call.livekit_token) {
+          return null;
+        }
+        return call;
+      }
+
+      async function loadLatest() {
+        try {
+          const resp = await fetch("latest_call.json", { cache: "no-store" });
+          if (!resp.ok) {
+            throw new Error("latest_call.json not found");
+          }
+          const data = await resp.json();
+          callData = extractCall(data);
+          if (callData) {
+            setStatus("Call ready. Click the avatar to join.");
+            if (callData.id) {
+              setHint(`Call ID: ${callData.id}`);
+            }
+          } else {
+            setStatus("latest_call.json missing LiveKit data.");
+          }
+        } catch (err) {
+          setStatus("Could not load latest_call.json.");
+          setHint("Serve this page over http://localhost and rerun create.py.");
+        }
+      }
+
+      function openCallTab() {
+        if (!callData) {
+          setStatus("No call data loaded. Reloading...");
+          loadLatest();
+          return;
+        }
+
+        localStorage.setItem("livekit_url", callData.livekit_url);
+        localStorage.setItem("livekit_token", callData.livekit_token);
+        if (callData.id) {
+          localStorage.setItem("livekit_call_id", callData.id);
+        }
+
+        const url = new URL("agent-call.html", window.location.href);
+        if (callData.id) {
+          url.searchParams.set("call_id", callData.id);
+        }
+        window.open(url.toString(), "_blank", "noopener");
+      }
+
+      avatarBtn.addEventListener("click", openCallTab);
+      window.addEventListener("load", loadLatest);
+    </script>
+  </body>
+</html>

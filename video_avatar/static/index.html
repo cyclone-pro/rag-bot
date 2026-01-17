@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Interview Monitor Demo</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 2rem auto;
+        max-width: 960px;
+        line-height: 1.5;
+      }
+      form {
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      }
+      label {
+        display: block;
+        margin-bottom: 0.5rem;
+        font-weight: 600;
+      }
+      input,
+      textarea,
+      button {
+        width: 100%;
+        margin-bottom: 1rem;
+        padding: 0.5rem;
+        font-size: 1rem;
+      }
+      pre {
+        background: #111;
+        color: #0f0;
+        padding: 1rem;
+        border-radius: 6px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Interview Live Monitoring</h1>
+    <p>
+      Use the forms below to send events to the FastAPI backend. Frame uploads
+      trigger YOLO analysis, transcripts are scanned for suspicious keywords and
+      the log shows every recorded flag.
+    </p>
+
+    <form id="frame-form">
+      <h2>Upload Frame</h2>
+      <label>
+        Candidate ID
+        <input type="text" name="candidate_id" value="demo_candidate" required />
+      </label>
+      <label>
+        Frame Image (jpg/png/webp)
+        <input type="file" name="frame" accept="image/*" required />
+      </label>
+      <button type="submit">Analyze Frame</button>
+    </form>
+
+    <form id="transcript-form">
+      <h2>Scan Transcript</h2>
+      <label>
+        Candidate ID
+        <input type="text" name="candidate_id" value="demo_candidate" required />
+      </label>
+      <label>
+        Transcript Text
+        <textarea
+          name="transcript_text"
+          rows="6"
+          placeholder="Paste transcript text here"
+        ></textarea>
+      </label>
+      <button type="submit">Upload Transcript</button>
+    </form>
+
+    <section>
+      <button id="log-button" style="width: auto">Refresh Flag Log</button>
+    </section>
+
+    <h2>Last Response</h2>
+    <pre id="output">Waiting for interaction...</pre>
+
+    <script>
+      const output = document.getElementById("output");
+
+      function show(data) {
+        output.textContent = JSON.stringify(data, null, 2);
+      }
+
+      async function submitFrame(event) {
+        event.preventDefault();
+        const form = event.target;
+        const data = new FormData(form);
+        const response = await fetch("/api/upload-frame", {
+          method: "POST",
+          body: data,
+        });
+        show(await response.json());
+      }
+
+      async function submitTranscript(event) {
+        event.preventDefault();
+        const form = event.target;
+        const data = new FormData();
+        const candidateId = form.candidate_id.value;
+        const text = form.transcript_text.value || "";
+
+        data.append("candidate_id", candidateId);
+        data.append(
+          "transcript_file",
+          new Blob([text], { type: "text/plain" }),
+          "transcript.txt"
+        );
+
+        const response = await fetch("/api/upload-transcript", {
+          method: "POST",
+          body: data,
+        });
+        show(await response.json());
+      }
+
+      async function fetchLog() {
+        const response = await fetch("/api/log");
+        show(await response.json());
+      }
+
+      document
+        .getElementById("frame-form")
+        .addEventListener("submit", submitFrame);
+      document
+        .getElementById("transcript-form")
+        .addEventListener("submit", submitTranscript);
+      document
+        .getElementById("log-button")
+        .addEventListener("click", fetchLog);
+    </script>
+  </body>
+</html>
