@@ -17,7 +17,7 @@ class MilvusService:
     """Handle Milvus operations"""
     
     def __init__(self):
-        self.collection_name = "qa_embeddings"
+        self.collection_name = settings.milvus_qa_collection
         self.collection = None
         self._connect()
         self._ensure_collection()
@@ -55,12 +55,27 @@ class MilvusService:
             FieldSchema(
                 name="interview_id", 
                 dtype=DataType.VARCHAR, 
-                max_length=50
+                max_length=64
             ),
             FieldSchema(
                 name="candidate_id", 
                 dtype=DataType.VARCHAR, 
-                max_length=50
+                max_length=64
+            ),
+            FieldSchema(
+                name="job_id", 
+                dtype=DataType.VARCHAR, 
+                max_length=64
+            ),
+            FieldSchema(
+                name="job_title",
+                dtype=DataType.VARCHAR,
+                max_length=256
+            ),
+            FieldSchema(
+                name="job_description",
+                dtype=DataType.VARCHAR,
+                max_length=2048
             ),
             FieldSchema(
                 name="question_index", 
@@ -72,6 +87,10 @@ class MilvusService:
                 max_length=500
             ),
             FieldSchema(
+                name="interview_date",
+                dtype=DataType.INT64
+            ),
+            FieldSchema(
                 name="embedding", 
                 dtype=DataType.FLOAT_VECTOR, 
                 dim=768
@@ -80,7 +99,7 @@ class MilvusService:
         
         schema = CollectionSchema(
             fields=fields,
-            description="Interview Q&A embeddings for semantic search"
+            description="Interview Q&A embeddings for semantic search (v2)"
         )
         
         self.collection = Collection(
@@ -91,13 +110,25 @@ class MilvusService:
         # Create index
         index_params = {
             "metric_type": "COSINE",
-            "index_type": "IVF_FLAT",
-            "params": {"nlist": 1024}
+            "index_type": "HNSW",
+            "params": {"M": 16, "efConstruction": 200}
         }
         
         self.collection.create_index(
             field_name="embedding",
             index_params=index_params
+        )
+        self.collection.create_index(
+            field_name="interview_id",
+            index_params={"index_type": "INVERTED"}
+        )
+        self.collection.create_index(
+            field_name="candidate_id",
+            index_params={"index_type": "INVERTED"}
+        )
+        self.collection.create_index(
+            field_name="job_id",
+            index_params={"index_type": "INVERTED"}
         )
         
         logger.info(f"✅ Created collection: {self.collection_name}")
@@ -114,8 +145,12 @@ class MilvusService:
                 - id: Unique ID
                 - interview_id
                 - candidate_id
+                - job_id
+                - job_title
+                - job_description
                 - question_index
                 - answer_snippet
+                - interview_date
                 - embedding (768-dim list)
         
         Returns:
@@ -129,8 +164,12 @@ class MilvusService:
             [d["id"] for d in embeddings_data],
             [d["interview_id"] for d in embeddings_data],
             [d["candidate_id"] for d in embeddings_data],
+            [d.get("job_id", "") for d in embeddings_data],
+            [d.get("job_title", "") for d in embeddings_data],
+            [d.get("job_description", "") for d in embeddings_data],
             [d["question_index"] for d in embeddings_data],
             [d["answer_snippet"] for d in embeddings_data],
+            [d.get("interview_date", 0) for d in embeddings_data],
             [d["embedding"] for d in embeddings_data]
         ]
         
@@ -175,7 +214,11 @@ class MilvusService:
             output_fields=[
                 "interview_id", 
                 "candidate_id", 
+                "job_id",
+                "job_title",
+                "job_description",
                 "question_index",
+                "interview_date",
                 "answer_snippet"
             ],
             expr=filter_expr
@@ -189,7 +232,11 @@ class MilvusService:
                     "milvus_id": hit.id,
                     "interview_id": hit.entity.get("interview_id"),
                     "candidate_id": hit.entity.get("candidate_id"),
+                    "job_id": hit.entity.get("job_id"),
+                    "job_title": hit.entity.get("job_title"),
+                    "job_description": hit.entity.get("job_description"),
                     "question_index": hit.entity.get("question_index"),
+                    "interview_date": hit.entity.get("interview_date"),
                     "answer_snippet": hit.entity.get("answer_snippet"),
                     "similarity_score": hit.score
                 })

@@ -203,6 +203,10 @@ def analyze_interviews(
     output_fields = list(QA_BASE_FIELDS)
     if "job_id" in fields_set:
         output_fields.append("job_id")
+    if "job_title" in fields_set:
+        output_fields.append("job_title")
+    if "job_description" in fields_set:
+        output_fields.append("job_description")
     if "interview_date" in fields_set:
         output_fields.append("interview_date")
 
@@ -236,6 +240,8 @@ def analyze_interviews(
                 "interview_id": iid,
                 "candidate_id": recs[0].get("candidate_id"),
                 "job_id": recs[0].get("job_id"),
+                "job_title": recs[0].get("job_title"),
+                "job_description": recs[0].get("job_description"),
                 "interview_date": recs[0].get("interview_date"),
                 **summary,
             }
@@ -329,9 +335,16 @@ def analyze_interviews(
             )
 
         ranked.sort(key=lambda x: x.get("overall_score", 0), reverse=True)
+        job_title = None
+        job_description = None
+        if interview_items:
+            job_title = interview_items[0].get("job_title")
+            job_description = interview_items[0].get("job_description")
         return {
             "mode": mode,
             "job_id": job_id,
+            "job_title": job_title,
+            "job_description": job_description,
             "latest_basis": latest_basis,
             "total_candidates": len(ranked),
             "candidates": ranked,

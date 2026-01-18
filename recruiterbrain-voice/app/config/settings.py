@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     milvus_host: str 
     milvus_port: int = 19530
     milvus_collection: str = "interview_transcripts_v2"
+    milvus_qa_collection: str = "qa_embeddings_v2"
     milvus_pool_size: int = 10
     
     # ===== EMBEDDINGS =====

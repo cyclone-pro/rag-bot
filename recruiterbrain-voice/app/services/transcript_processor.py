@@ -6,7 +6,7 @@ Processes conversation log and generates embeddings efficiently
 import logging
 import json
 from typing import Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.utils.sentiment_analyzer import analyze_sentiment, get_sentiment_label
 from app.utils.keyword_extractor import extract_keywords
@@ -16,6 +16,29 @@ from app.services.database import get_db_session
 from sqlalchemy import text,cast
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_timestamp(value: Any) -> int:
+    if not value:
+        return 0
+    if isinstance(value, (int, float)):
+        value_int = int(value)
+        return int(value_int / 1000) if value_int > 1_000_000_000_000 else value_int
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return 0
+        if raw.isdigit():
+            return _parse_timestamp(int(raw))
+        try:
+            raw = raw.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp())
+        except Exception:
+            return 0
+    return 0
 
 
 async def process_interview_transcript(
@@ -64,6 +87,14 @@ async def process_interview_transcript(
         # Get services
         embedding_service = get_embedding_service()
         milvus_service = get_milvus_service()
+
+        job_data = conversation_data.get("job", {}) or {}
+        job_id = str(job_data.get("job_id") or "").strip()
+        job_title = str(job_data.get("title") or "").strip()
+        job_description = str(job_data.get("description") or "").strip()
+        interview_date = _parse_timestamp(
+            conversation_data.get("metadata", {}).get("start_time")
+        )
         
         # ✅ BATCH PROCESSING: Extract all answers first
         answers = [qa["answer"] for qa in qa_pairs]
@@ -111,8 +142,12 @@ async def process_interview_transcript(
                 "id": milvus_id,
                 "interview_id": interview_id,
                 "candidate_id": conversation_data["candidate"]["candidate_id"],
+                "job_id": job_id,
+                "job_title": job_title,
+                "job_description": job_description,
                 "question_index": idx,
                 "answer_snippet": qa["answer"][:500],
+                "interview_date": interview_date,
                 "embedding": embedding  # ✅ Already computed in batch
             })
         

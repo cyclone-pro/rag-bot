@@ -29,7 +29,7 @@ else:
 MILVUS_URI = os.getenv("MILVUS_URI")
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "")
 COLLECTION = os.getenv("MILVUS_COLLECTION", "candidates_v3")
-QA_COLLECTION = os.getenv("MILVUS_QA_COLLECTION", "qa_embeddings")
+QA_COLLECTION = os.getenv("MILVUS_QA_COLLECTION", "qa_embeddings_v2")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "intfloat/e5-base-v2")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")

@@ -308,6 +308,13 @@ body {
     margin-top: 0.25rem;
   }
 
+  .analysis-description {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-top: 0.5rem;
+    line-height: 1.4;
+  }
+
   .analysis-metrics {
     display: flex;
     gap: 0.5rem;

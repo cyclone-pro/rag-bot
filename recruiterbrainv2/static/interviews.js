@@ -19,6 +19,12 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function truncate(text, maxLength = 160) {
+  if (!text) return "";
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3)}...`;
+}
+
 function updateFields() {
   const mode = modeSelect.value;
   candidateField.style.display = mode === "candidate" ? "block" : "none";
@@ -49,19 +55,19 @@ function renderSummaryCards(summary) {
   return `
     <div class="summary-card">
       <div class="summary-label">Overall Score</div>
-      <div class="summary-value">${summary.overall_score ?? "—"}</div>
+      <div class="summary-value">${summary.overall_score ?? "n/a"}</div>
     </div>
     <div class="summary-card">
       <div class="summary-label">Avg Sentiment</div>
-      <div class="summary-value">${summary.avg_sentiment ?? "—"}</div>
+      <div class="summary-value">${summary.avg_sentiment ?? "n/a"}</div>
     </div>
     <div class="summary-card">
       <div class="summary-label">Sentiment</div>
-      <div class="summary-value">${summary.sentiment_label ?? "—"}</div>
+      <div class="summary-value">${summary.sentiment_label ?? "n/a"}</div>
     </div>
     <div class="summary-card">
       <div class="summary-label">Interviews</div>
-      <div class="summary-value">${summary.interview_count ?? "—"}</div>
+      <div class="summary-value">${summary.interview_count ?? "n/a"}</div>
     </div>
   `;
 }
@@ -78,12 +84,14 @@ function renderInterviewCard(item) {
         <div>
           <div class="analysis-title">${escapeHtml(item.interview_id || "Interview")}</div>
           <div class="analysis-subtitle">
-            Candidate: ${escapeHtml(item.candidate_id || "—")}
-            ${item.job_id ? ` • Job: ${escapeHtml(item.job_id)}` : ""}
+            Candidate: ${escapeHtml(item.candidate_id || "n/a")}
+            ${item.job_id ? ` | Job: ${escapeHtml(item.job_id)}` : ""}
           </div>
+          ${item.job_title ? `<div class="analysis-subtitle">Role: ${escapeHtml(item.job_title)}</div>` : ""}
+          ${item.job_description ? `<div class="analysis-description">${escapeHtml(truncate(item.job_description))}</div>` : ""}
         </div>
         <div class="analysis-metrics">
-          <span class="score-pill">Score ${item.overall_score ?? "—"}</span>
+          <span class="score-pill">Score ${item.overall_score ?? "n/a"}</span>
           <span class="sentiment-pill ${sentimentClass(item.sentiment_label)}">
             ${item.sentiment_label || "neutral"}
           </span>
@@ -94,13 +102,13 @@ function renderInterviewCard(item) {
         <div>
           <div class="keyword-label">Tech Keywords</div>
           <div class="keyword-list">
-            ${tech.length ? tech.map((k) => `<span>${escapeHtml(k)}</span>`).join("") : "—"}
+            ${tech.length ? tech.map((k) => `<span>${escapeHtml(k)}</span>`).join("") : "n/a"}
           </div>
         </div>
         <div>
           <div class="keyword-label">Top Keywords</div>
           <div class="keyword-list">
-            ${top.length ? top.map((k) => `<span>${escapeHtml(k)}</span>`).join("") : "—"}
+            ${top.length ? top.map((k) => `<span>${escapeHtml(k)}</span>`).join("") : "n/a"}
           </div>
         </div>
       </div>
@@ -133,7 +141,7 @@ function renderCandidateCard(candidate) {
           </div>
         </div>
         <div class="analysis-metrics">
-          <span class="score-pill">Score ${candidate.overall_score ?? "—"}</span>
+          <span class="score-pill">Score ${candidate.overall_score ?? "n/a"}</span>
           <span class="sentiment-pill ${sentimentClass(candidate.sentiment_label)}">
             ${candidate.sentiment_label || "neutral"}
           </span>
@@ -144,13 +152,13 @@ function renderCandidateCard(candidate) {
         <div>
           <div class="keyword-label">Tech Keywords</div>
           <div class="keyword-list">
-            ${(candidate.tech_keywords || []).slice(0, 8).map((k) => `<span>${escapeHtml(k)}</span>`).join("") || "—"}
+            ${(candidate.tech_keywords || []).slice(0, 8).map((k) => `<span>${escapeHtml(k)}</span>`).join("") || "n/a"}
           </div>
         </div>
         <div>
           <div class="keyword-label">Top Keywords</div>
           <div class="keyword-list">
-            ${(candidate.top_keywords || []).slice(0, 8).map((k) => `<span>${escapeHtml(k)}</span>`).join("") || "—"}
+            ${(candidate.top_keywords || []).slice(0, 8).map((k) => `<span>${escapeHtml(k)}</span>`).join("") || "n/a"}
           </div>
         </div>
       </div>
@@ -181,9 +189,14 @@ function renderResults(data) {
         </div>
         <div class="summary-card">
           <div class="summary-label">Job ID</div>
-          <div class="summary-value">${escapeHtml(data.job_id || "—")}</div>
+          <div class="summary-value">${escapeHtml(data.job_id || "n/a")}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Job Title</div>
+          <div class="summary-value">${escapeHtml(data.job_title || "n/a")}</div>
         </div>
       </div>
+      ${data.job_description ? `<div class="analysis-description">${escapeHtml(truncate(data.job_description, 220))}</div>` : ""}
     `;
     resultsDiv.innerHTML = (data.candidates || []).map(renderCandidateCard).join("");
     return;
