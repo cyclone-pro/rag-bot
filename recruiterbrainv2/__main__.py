@@ -53,6 +53,7 @@ from recruiterbrainv2.config import (
     ENABLE_CACHE, 
     SEARCH_OUTPUT_FIELDS, 
     get_milvus_client,
+    QA_COLLECTION,
     ENABLE_CONNECTION_POOL
 )
 
@@ -83,6 +84,7 @@ from .ingestion import (
 from .audio_transcription import transcribe_audio_whisper
 from .fit_analyzer import analyze_candidate_fit
 from .skill_extractor import extract_requirements
+from .interview_analysis import analyze_interviews
 
 # ==================== LOGGING SETUP ====================
 os.makedirs('logs', exist_ok=True)
@@ -280,6 +282,7 @@ RATE_LIMITS = {
     "upload": (5, 60),          # 5/minute
     "bulk_upload": (1, 3600),   # 1/hour
     "job_status": (60, 60),     # 60/minute
+    "interviews": (10, 60),     # 10/minute
 }
 
 @app.get("/styles.css")
@@ -294,6 +297,14 @@ async def serve_styles():
 async def serve_script():
     """Serve JS file at root level."""
     js_path = os.path.join(BASE_DIR, "static", "script.js")
+    if os.path.exists(js_path):
+        return FileResponse(js_path, media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="JS file not found")
+
+@app.get("/interviews.js")
+async def serve_interviews_script():
+    """Serve interview analysis JS file at root level."""
+    js_path = os.path.join(BASE_DIR, "static", "interviews.js")
     if os.path.exists(js_path):
         return FileResponse(js_path, media_type="application/javascript")
     raise HTTPException(status_code=404, detail="JS file not found")
@@ -433,6 +444,21 @@ class AnalyzeFitRequest(BaseModel):
     job_description: str = Field(..., min_length=10, max_length=10000, description="Original job query/description")
     candidate_id: str = Field(..., min_length=1, max_length=64, description="Candidate ID to analyze")
 
+class InterviewAnalyzeRequest(BaseModel):
+    mode: str = Field(..., description="candidate|interview|job")
+    candidate_id: Optional[str] = Field(None, max_length=64)
+    interview_id: Optional[str] = Field(None, max_length=64)
+    job_id: Optional[str] = Field(None, max_length=64)
+    latest_only: bool = False
+    limit: int = Field(500, ge=1, le=2000)
+
+    @validator("mode")
+    def validate_mode(cls, v):
+        allowed = {"candidate", "interview", "job"}
+        if v not in allowed:
+            raise ValueError(f"mode must be one of {sorted(allowed)}")
+        return v
+
 class InsightRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=5000)
     filters: Optional[Dict[str, Any]] = None
@@ -493,6 +519,7 @@ async def startup_event():
     logger.info(f"Connection pooling: {'enabled' if ENABLE_CONNECTION_POOL else 'disabled'}")
     logger.info(f"Cache: {'enabled' if ENABLE_CACHE else 'disabled'}")
     logger.info(f"Target collection: {COLLECTION}")
+    logger.info(f"QA collection: {QA_COLLECTION}")
     
     # Test Milvus connection
     try:
@@ -501,6 +528,8 @@ async def startup_event():
         logger.info(f"✅ Milvus connected: {len(collections)} collections")
         if COLLECTION not in collections:
             logger.warning(f"⚠️  Target collection '{COLLECTION}' not found!")
+        if QA_COLLECTION not in collections:
+            logger.warning(f"⚠️  QA collection '{QA_COLLECTION}' not found!")
     except Exception as e:
         logger.error(f"❌ Milvus connection failed: {e}")
     
@@ -564,6 +593,13 @@ def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
+@app.get("/interviews", response_class=HTMLResponse)
+def interviews_page(request: Request):
+    """Serve the interview analysis interface."""
+    logger.debug("Serving interview analysis page")
+    return templates.TemplateResponse("interviews.html", {"request": request})
+
+
 @app.get("/api")
 def root() -> Dict[str, str]:
     """API root endpoint."""
@@ -573,6 +609,7 @@ def root() -> Dict[str, str]:
         "endpoints": {
             "chat": "POST /v2/chat",
             "insight": "POST /v2/insight",
+            "interviews": "POST /v2/analyze_interviews",
             "upload": "POST /v2/upload_resume_celery",
             "job_status": "GET /v2/jobs/celery/{task_id}"
         }
@@ -1292,6 +1329,48 @@ async def analyze_candidate_fit_endpoint(
             status_code=500,
             detail=f"Fit analysis failed: {str(e)}"
         )
+
+
+@app.post("/v2/analyze_interviews")
+async def analyze_interviews_endpoint(
+    request: Request,
+    payload: InterviewAnalyzeRequest,
+    response: Response
+) -> Dict[str, Any]:
+    """Analyze interview transcripts from the qa_embeddings collection."""
+    await check_rate_limit(request, "interviews")
+    response.headers["X-RateLimit-Limit"] = "10"
+    response.headers["X-RateLimit-Window"] = "60"
+
+    mode = payload.mode
+    if mode == "candidate" and not payload.candidate_id:
+        return {"error": "candidate_id is required for mode=candidate"}
+    if mode == "interview" and not payload.interview_id:
+        return {"error": "interview_id is required for mode=interview"}
+    if mode == "job" and not payload.job_id:
+        return {"error": "job_id is required for mode=job"}
+
+    logger.info(
+        "🧾 Interview analysis request: mode=%s candidate=%s interview=%s job=%s limit=%s",
+        mode,
+        payload.candidate_id,
+        payload.interview_id,
+        payload.job_id,
+        payload.limit,
+    )
+
+    try:
+        return analyze_interviews(
+            mode=mode,
+            candidate_id=payload.candidate_id,
+            interview_id=payload.interview_id,
+            job_id=payload.job_id,
+            latest_only=payload.latest_only,
+            limit=payload.limit,
+        )
+    except Exception as exc:
+        logger.exception("Interview analysis error: %s", exc)
+        return {"error": str(exc)}
 
 
 @app.post('/compare_candidates')

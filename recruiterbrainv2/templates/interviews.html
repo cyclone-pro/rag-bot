@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Recruiter Brain - Interview Analysis</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-brand">Recruiter Brain</div>
+        <div class="sidebar-subtitle">Workspace</div>
+        <nav class="sidebar-nav">
+          <a class="nav-link" href="/">Search</a>
+          <a class="nav-link active" href="/interviews">Analyze Interviews</a>
+        </nav>
+      </aside>
+
+      <div class="container">
+        <header class="analysis-header">
+          <h1>Interview Intelligence</h1>
+          <p class="subtitle">
+            Review interview transcripts, sentiment, and technical signal strength in one place.
+          </p>
+          <span class="version-badge">Interview Analyzer</span>
+        </header>
+
+        <div class="analysis-layout">
+          <section class="panel analysis-controls">
+            <div class="panel-header">🧾 Analyze Interviews</div>
+            <div class="analysis-form">
+              <label for="analysis-mode">Analysis Mode</label>
+              <select id="analysis-mode">
+                <option value="candidate">By Candidate ID</option>
+                <option value="interview">By Interview ID</option>
+                <option value="job">By Job ID</option>
+              </select>
+
+              <div class="analysis-field" data-mode="candidate">
+                <label for="candidate-id">Candidate ID</label>
+                <input id="candidate-id" type="text" placeholder="cand_test_001" />
+              </div>
+
+              <div class="analysis-field" data-mode="interview">
+                <label for="interview-id">Interview ID</label>
+                <input id="interview-id" type="text" placeholder="interview_706ebff56931" />
+              </div>
+
+              <div class="analysis-field" data-mode="job">
+                <label for="job-id">Job ID</label>
+                <input id="job-id" type="text" placeholder="job_2024_001" />
+              </div>
+
+              <div class="analysis-options">
+                <label class="checkbox-row">
+                  <input id="latest-only" type="checkbox" />
+                  Latest interview only
+                </label>
+                <div class="inline-input">
+                  <label for="record-limit">Limit</label>
+                  <input id="record-limit" type="number" min="1" max="2000" value="500" />
+                </div>
+              </div>
+
+              <button id="analyze-btn" class="btn-primary" type="button">Run Analysis</button>
+              <div id="analysis-status" class="analysis-status"></div>
+            </div>
+
+            <div class="analysis-hint">
+              <strong>Tips:</strong>
+              <ul>
+                <li>Use Candidate ID for all interviews linked to one person.</li>
+                <li>Use Interview ID for a single transcript timeline.</li>
+                <li>Use Job ID to rank candidates who interviewed for a role.</li>
+              </ul>
+            </div>
+          </section>
+
+          <section class="panel analysis-results">
+            <div class="panel-header">📊 Results</div>
+            <div id="analysis-summary" class="analysis-summary">
+              Run an analysis to see sentiment, keywords, and transcript highlights.
+            </div>
+            <div id="analysis-results" class="analysis-results-grid"></div>
+          </section>
+        </div>
+
+        <footer>
+          Interview Intelligence | Powered by Milvus + Sentiment + Keyword Signals
+        </footer>
+      </div>
+    </div>
+
+    <script src="interviews.js"></script>
+  </body>
+</html>

@@ -7,13 +7,23 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="container">
-      <!-- Header -->
-      <header>
-        <h1>Recruiter Brain</h1>
-        <p class="subtitle">Intelligent candidate search powered by hybrid AI + Voice</p>
-        <span class="version-badge">V2.0 - Voice Enabled 🎤</span>
-      </header>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-brand">Recruiter Brain</div>
+        <div class="sidebar-subtitle">Workspace</div>
+        <nav class="sidebar-nav">
+          <a class="nav-link active" href="/">Search</a>
+          <a class="nav-link" href="/interviews">Analyze Interviews</a>
+        </nav>
+      </aside>
+
+      <div class="container">
+        <!-- Header -->
+        <header>
+          <h1>Recruiter Brain</h1>
+          <p class="subtitle">Intelligent candidate search powered by hybrid AI + Voice</p>
+          <span class="version-badge">V2.0 - Voice Enabled 🎤</span>
+        </header>
 
       <!-- Resume Upload Panel -->
       <section class="panel">
@@ -196,10 +206,11 @@
   </div>
 </div>
 
-      <!-- Footer -->
-      <footer>
-        Recruiter Brain V2 | Powered by Milvus + Hybrid Search + OpenAI Whisper
-      </footer>
+        <!-- Footer -->
+        <footer>
+          Recruiter Brain V2 | Powered by Milvus + Hybrid Search + OpenAI Whisper
+        </footer>
+      </div>
     </div>
 
     <script src="script.js"></script>
