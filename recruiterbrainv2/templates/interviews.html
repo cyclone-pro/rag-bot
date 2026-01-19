@@ -35,6 +35,7 @@
                 <option value="candidate">By Candidate ID</option>
                 <option value="interview">By Interview ID</option>
                 <option value="job">By Job ID</option>
+                <option value="jd">By JD Text</option>
               </select>
 
               <div class="analysis-field" data-mode="candidate">
@@ -50,6 +51,11 @@
               <div class="analysis-field" data-mode="job">
                 <label for="job-id">Job ID</label>
                 <input id="job-id" type="text" placeholder="job_2024_001" />
+              </div>
+
+              <div class="analysis-field" data-mode="jd">
+                <label for="jd-text">Job Description</label>
+                <textarea id="jd-text" rows="8" placeholder="Paste the job description here"></textarea>
               </div>
 
               <div class="analysis-options">
@@ -73,6 +79,7 @@
                 <li>Use Candidate ID for all interviews linked to one person.</li>
                 <li>Use Interview ID for a single transcript timeline.</li>
                 <li>Use Job ID to rank candidates who interviewed for a role.</li>
+                <li>Use JD Text to score interviews against required skills.</li>
               </ul>
             </div>
           </section>

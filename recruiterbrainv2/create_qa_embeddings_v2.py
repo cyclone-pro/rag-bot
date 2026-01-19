@@ -5,6 +5,9 @@ and optionally migrate data from qa_embeddings.
 Usage:
   python create_qa_embeddings_v2.py --migrate
   python create_qa_embeddings_v2.py --drop-existing --migrate --mapping mapping.json
+
+Generate mapping from Postgres:
+  python recruiterbrain-voice/scripts/export_qa_embeddings_mapping.py --output mapping.jsonl
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from dotenv import load_dotenv
 from pymilvus import (
     Collection,
     CollectionSchema,
@@ -30,6 +34,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 EMBEDDING_DIM = 768
+
+load_dotenv()
 
 
 def connect_milvus() -> None:
@@ -50,6 +56,10 @@ def connect_milvus() -> None:
 
     connections.connect(alias="default", host=host, port=port)
     logger.info("Connected to Milvus at %s:%s", host, port)
+
+
+def _safe_filter_value(value: str) -> str:
+    return value.replace('"', '""').replace("'", "''").strip()
 
 
 def create_collection(name: str, drop_existing: bool) -> Collection:
@@ -241,6 +251,7 @@ def migrate_data(
     batch_size: int,
     limit: Optional[int],
     dry_run: bool,
+    flush_source: bool,
 ) -> Tuple[int, int]:
     if not utility.has_collection(source_name):
         raise RuntimeError(f"Source collection not found: {source_name}")
@@ -248,6 +259,10 @@ def migrate_data(
     source = Collection(source_name)
     target = Collection(target_name)
     source.load()
+    if flush_source:
+        logger.info("Flushing source collection to ensure all entities are queryable...")
+        source.flush()
+        source.load()
     target.load()
 
     total = source.num_entities
@@ -265,21 +280,7 @@ def migrate_data(
         "embedding",
     ]
 
-    migrated = 0
-    offset = 0
-    expr = 'id != ""'
-
-    while offset < total:
-        batch_limit = min(batch_size, total - offset)
-        rows = source.query(
-            expr=expr,
-            output_fields=output_fields,
-            limit=batch_limit,
-            offset=offset,
-        )
-        if not rows:
-            break
-
+    def _build_payload(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         payload: List[Dict[str, Any]] = []
         for row in rows:
             interview_id = (row.get("interview_id") or "").strip()
@@ -298,13 +299,59 @@ def migrate_data(
                     "embedding": row.get("embedding"),
                 }
             )
+        return payload
 
-        if not dry_run:
-            target.insert(payload)
+    migrated = 0
 
-        migrated += len(payload)
-        offset += len(rows)
-        logger.info("Migrated %d/%d rows", migrated, total)
+    if mapping:
+        interview_ids = list(mapping.keys())
+        for interview_id in interview_ids:
+            expr = f'interview_id == "{_safe_filter_value(interview_id)}"'
+            rows = source.query(
+                expr=expr,
+                output_fields=output_fields,
+                limit=5000,
+            )
+            if not rows:
+                continue
+            payload = _build_payload(rows)
+
+            if limit is not None and migrated + len(payload) > limit:
+                payload = payload[: max(0, limit - migrated)]
+
+            if payload and not dry_run:
+                target.insert(payload)
+
+            migrated += len(payload)
+            logger.info("Migrated %d/%d rows", migrated, total)
+
+            if limit is not None and migrated >= limit:
+                break
+    else:
+        expr = 'interview_id != ""'
+        iterator = source.query_iterator(
+            expr=expr,
+            output_fields=output_fields,
+            batch_size=batch_size,
+        )
+
+        while True:
+            rows = iterator.next()
+            if not rows:
+                break
+            payload = _build_payload(rows)
+
+            if limit is not None and migrated + len(payload) > limit:
+                payload = payload[: max(0, limit - migrated)]
+
+            if payload and not dry_run:
+                target.insert(payload)
+
+            migrated += len(payload)
+            logger.info("Migrated %d/%d rows", migrated, total)
+
+            if limit is not None and migrated >= limit:
+                break
 
     if not dry_run:
         target.flush()
@@ -323,6 +370,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--flush-source", action="store_true", help="Flush source collection before migration")
     args = parser.parse_args()
 
     connect_milvus()
@@ -337,6 +385,7 @@ def main() -> None:
             batch_size=args.batch_size,
             limit=args.limit,
             dry_run=args.dry_run,
+            flush_source=args.flush_source,
         )
         logger.info("Migration complete: %d/%d rows", migrated, total)
     else:

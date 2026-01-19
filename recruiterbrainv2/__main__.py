@@ -445,16 +445,17 @@ class AnalyzeFitRequest(BaseModel):
     candidate_id: str = Field(..., min_length=1, max_length=64, description="Candidate ID to analyze")
 
 class InterviewAnalyzeRequest(BaseModel):
-    mode: str = Field(..., description="candidate|interview|job")
+    mode: str = Field(..., description="candidate|interview|job|jd")
     candidate_id: Optional[str] = Field(None, max_length=64)
     interview_id: Optional[str] = Field(None, max_length=64)
     job_id: Optional[str] = Field(None, max_length=64)
+    jd_text: Optional[str] = Field(None, max_length=20000)
     latest_only: bool = False
     limit: int = Field(500, ge=1, le=2000)
 
     @validator("mode")
     def validate_mode(cls, v):
-        allowed = {"candidate", "interview", "job"}
+        allowed = {"candidate", "interview", "job", "jd"}
         if v not in allowed:
             raise ValueError(f"mode must be one of {sorted(allowed)}")
         return v
@@ -1349,6 +1350,8 @@ async def analyze_interviews_endpoint(
         return {"error": "interview_id is required for mode=interview"}
     if mode == "job" and not payload.job_id:
         return {"error": "job_id is required for mode=job"}
+    if mode == "jd" and not payload.jd_text:
+        return {"error": "jd_text is required for mode=jd"}
 
     logger.info(
         "🧾 Interview analysis request: mode=%s candidate=%s interview=%s job=%s limit=%s",
@@ -1365,6 +1368,7 @@ async def analyze_interviews_endpoint(
             candidate_id=payload.candidate_id,
             interview_id=payload.interview_id,
             job_id=payload.job_id,
+            jd_text=payload.jd_text,
             latest_only=payload.latest_only,
             limit=payload.limit,
         )

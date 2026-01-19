@@ -2,9 +2,11 @@ const modeSelect = document.getElementById("analysis-mode");
 const candidateField = document.querySelector('[data-mode="candidate"]');
 const interviewField = document.querySelector('[data-mode="interview"]');
 const jobField = document.querySelector('[data-mode="job"]');
+const jdField = document.querySelector('[data-mode="jd"]');
 const candidateInput = document.getElementById("candidate-id");
 const interviewInput = document.getElementById("interview-id");
 const jobInput = document.getElementById("job-id");
+const jdInput = document.getElementById("jd-text");
 const latestOnly = document.getElementById("latest-only");
 const limitInput = document.getElementById("record-limit");
 const analyzeBtn = document.getElementById("analyze-btn");
@@ -25,11 +27,24 @@ function truncate(text, maxLength = 160) {
   return `${text.slice(0, maxLength - 3)}...`;
 }
 
+function splitTags(value, limit = 8) {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value.filter(Boolean).slice(0, limit);
+  }
+  return value
+    .split(/[,\n;/|]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
 function updateFields() {
   const mode = modeSelect.value;
   candidateField.style.display = mode === "candidate" ? "block" : "none";
   interviewField.style.display = mode === "interview" ? "block" : "none";
   jobField.style.display = mode === "job" ? "block" : "none";
+  jdField.style.display = mode === "jd" ? "block" : "none";
 }
 
 function setStatus(message, type = "info") {
@@ -131,14 +146,31 @@ function renderInterviewCard(item) {
 }
 
 function renderCandidateCard(candidate) {
+  const profile = candidate.candidate_profile || {};
+  const name = profile.name || candidate.candidate_id || "Candidate";
+  const location = [profile.location_city, profile.location_state, profile.location_country]
+    .filter(Boolean)
+    .join(", ");
+  const titles = profile.top_3_titles;
+  const summary = profile.semantic_summary ? truncate(profile.semantic_summary, 200) : "";
+  const resumeSkills = splitTags(
+    profile.skills_extracted || profile.tech_stack_primary || profile.tools_and_technologies,
+    8
+  );
+
   return `
     <div class="analysis-card">
       <div class="analysis-card-header">
         <div>
-          <div class="analysis-title">${escapeHtml(candidate.candidate_id || "Candidate")}</div>
+          <div class="analysis-title">${escapeHtml(name)}</div>
           <div class="analysis-subtitle">
-            Interviews: ${candidate.interview_count} • Answers: ${candidate.answer_count}
+            ID: ${escapeHtml(candidate.candidate_id || "n/a")} | Interviews: ${candidate.interview_count} | Answers: ${candidate.answer_count}
           </div>
+          ${profile.career_stage ? `<div class="analysis-subtitle">Level: ${escapeHtml(profile.career_stage)}</div>` : ""}
+          ${location ? `<div class="analysis-subtitle">Location: ${escapeHtml(location)}</div>` : ""}
+          ${profile.total_experience_years ? `<div class="analysis-subtitle">Experience: ${escapeHtml(profile.total_experience_years.toString())} yrs</div>` : ""}
+          ${titles ? `<div class="analysis-subtitle">Titles: ${escapeHtml(titles)}</div>` : ""}
+          ${summary ? `<div class="analysis-description">${escapeHtml(summary)}</div>` : ""}
         </div>
         <div class="analysis-metrics">
           <span class="score-pill">Score ${candidate.overall_score ?? "n/a"}</span>
@@ -149,6 +181,12 @@ function renderCandidateCard(candidate) {
       </div>
 
       <div class="analysis-keywords">
+        <div>
+          <div class="keyword-label">Resume Skills</div>
+          <div class="keyword-list">
+            ${resumeSkills.length ? resumeSkills.map((k) => `<span>${escapeHtml(k)}</span>`).join("") : "n/a"}
+          </div>
+        </div>
         <div>
           <div class="keyword-label">Tech Keywords</div>
           <div class="keyword-list">
@@ -166,6 +204,94 @@ function renderCandidateCard(candidate) {
       <button class="btn-secondary analyze-candidate-btn" data-candidate="${escapeHtml(candidate.candidate_id || "")}">
         Analyze Candidate Interviews
       </button>
+    </div>
+  `;
+}
+
+function renderJdCandidateCard(candidate) {
+  const profile = candidate.candidate_profile || {};
+  const name = profile.name || candidate.candidate_id || "Candidate";
+  const location = [profile.location_city, profile.location_state, profile.location_country]
+    .filter(Boolean)
+    .join(", ");
+  const titles = profile.top_3_titles;
+  const summary = profile.semantic_summary ? truncate(profile.semantic_summary, 200) : "";
+  const matched = candidate.matched_skills || [];
+  const missing = candidate.missing_skills || [];
+  const nice = candidate.nice_to_have_matched || [];
+  const resumeOnly = candidate.resume_only_skills || [];
+  const evidence = candidate.evidence || {};
+
+  const evidenceBlocks = Object.entries(evidence).map(([skill, snippets]) => {
+    const snippetHtml = (snippets || [])
+      .map(
+        (s) => `
+          <div class="answer-row">
+            <div class="answer-meta">Skill: ${escapeHtml(skill)} | Score ${s.quality_score ?? "n/a"}</div>
+            <div class="answer-text">${escapeHtml(s.snippet || "")}</div>
+          </div>
+        `
+      )
+      .join("");
+    return `
+      <div class="analysis-section">
+        <div class="keyword-label">Evidence: ${escapeHtml(skill)}</div>
+        ${snippetHtml || "<div class=\"analysis-subtitle\">n/a</div>"}
+      </div>
+    `;
+  });
+
+  return `
+    <div class="analysis-card">
+      <div class="analysis-card-header">
+        <div>
+          <div class="analysis-title">${escapeHtml(name)}</div>
+          <div class="analysis-subtitle">
+            ID: ${escapeHtml(candidate.candidate_id || "n/a")} | Score ${candidate.overall_score ?? "n/a"}
+          </div>
+          ${profile.career_stage ? `<div class="analysis-subtitle">Level: ${escapeHtml(profile.career_stage)}</div>` : ""}
+          ${location ? `<div class="analysis-subtitle">Location: ${escapeHtml(location)}</div>` : ""}
+          ${profile.total_experience_years ? `<div class="analysis-subtitle">Experience: ${escapeHtml(profile.total_experience_years.toString())} yrs</div>` : ""}
+          ${titles ? `<div class="analysis-subtitle">Titles: ${escapeHtml(titles)}</div>` : ""}
+          ${summary ? `<div class="analysis-description">${escapeHtml(summary)}</div>` : ""}
+        </div>
+        <div class="analysis-metrics">
+          <span class="score-pill">Coverage ${(candidate.coverage_ratio ?? 0) * 100}%</span>
+          <span class="sentiment-pill sentiment-neutral">Depth ${(candidate.depth_score ?? 0) * 100}%</span>
+        </div>
+      </div>
+
+      <div class="analysis-keywords">
+        <div>
+          <div class="keyword-label">Matched Skills</div>
+          <div class="keyword-list">
+            ${matched.length ? matched.map((k) => `<span>${escapeHtml(k)}</span>`).join("") : "n/a"}
+          </div>
+        </div>
+        <div>
+          <div class="keyword-label">Missing Skills</div>
+          <div class="keyword-list">
+            ${missing.length ? missing.map((k) => `<span>${escapeHtml(k)}</span>`).join("") : "n/a"}
+          </div>
+        </div>
+      </div>
+
+      <div class="analysis-keywords">
+        <div>
+          <div class="keyword-label">Nice-to-Have</div>
+          <div class="keyword-list">
+            ${nice.length ? nice.map((k) => `<span>${escapeHtml(k)}</span>`).join("") : "n/a"}
+          </div>
+        </div>
+        <div>
+          <div class="keyword-label">Resume-Only Skills</div>
+          <div class="keyword-list">
+            ${resumeOnly.length ? resumeOnly.map((k) => `<span>${escapeHtml(k)}</span>`).join("") : "n/a"}
+          </div>
+        </div>
+      </div>
+
+      ${evidenceBlocks.join("") || ""}
     </div>
   `;
 }
@@ -202,6 +328,44 @@ function renderResults(data) {
     return;
   }
 
+  if (data.mode === "jd") {
+    const jd = data.jd_summary || {};
+    summaryDiv.innerHTML = `
+      <div class="summary-grid">
+        <div class="summary-card">
+          <div class="summary-label">Candidates</div>
+          <div class="summary-value">${data.total_candidates ?? 0}</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Seniority</div>
+          <div class="summary-value">${escapeHtml(jd.seniority_level || "Any")}</div>
+        </div>
+      </div>
+      <div class="analysis-keywords" style="margin-top: 1rem;">
+        <div>
+          <div class="keyword-label">Must Have</div>
+          <div class="keyword-list">
+            ${(jd.must_have_skills || []).map((k) => `<span>${escapeHtml(k)}</span>`).join("") || "n/a"}
+          </div>
+        </div>
+        <div>
+          <div class="keyword-label">Nice to Have</div>
+          <div class="keyword-list">
+            ${(jd.nice_to_have_skills || []).map((k) => `<span>${escapeHtml(k)}</span>`).join("") || "n/a"}
+          </div>
+        </div>
+        <div>
+          <div class="keyword-label">Domain</div>
+          <div class="keyword-list">
+            ${(jd.domain_keywords || []).map((k) => `<span>${escapeHtml(k)}</span>`).join("") || "n/a"}
+          </div>
+        </div>
+      </div>
+    `;
+    resultsDiv.innerHTML = (data.candidates || []).map(renderJdCandidateCard).join("");
+    return;
+  }
+
   summaryDiv.innerHTML = `<div class="summary-grid">${renderSummaryCards(data.summary)}</div>`;
   resultsDiv.innerHTML = (data.interviews || []).map(renderInterviewCard).join("");
 }
@@ -220,6 +384,8 @@ async function runAnalysis() {
     payload.interview_id = interviewInput.value.trim();
   } else if (mode === "job") {
     payload.job_id = jobInput.value.trim();
+  } else if (mode === "jd") {
+    payload.jd_text = jdInput.value.trim();
   }
 
   setStatus("Running analysis...", "info");

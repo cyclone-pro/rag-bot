@@ -174,7 +174,8 @@ body {
 
   .analysis-controls select,
   .analysis-controls input[type="text"],
-  .analysis-controls input[type="number"] {
+  .analysis-controls input[type="number"],
+  .analysis-controls textarea {
     width: 100%;
     background: var(--bg);
     border: 1px solid var(--border);
@@ -383,6 +384,10 @@ body {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
+  }
+
+  .analysis-section {
+    margin-top: 1rem;
   }
 
   .answer-row {
