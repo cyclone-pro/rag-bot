@@ -7,7 +7,7 @@ import requests
 from dotenv import load_dotenv
 
 API_URL = "https://api.bey.dev/v1"
-EGE_STOCK_AVATAR_ID = "70b1b917-ed16-4531-bb6c-b0bdb79449b4"
+EGE_STOCK_AVATAR_ID = "b63ba4e6-d346-45d0-ad28-5ddffaac0bd0_v2"
 
 # Bey enforces a max system_prompt length of 10,000 chars.
 # Keep this compact but strict.

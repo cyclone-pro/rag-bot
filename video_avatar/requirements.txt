@@ -8,3 +8,5 @@ numpy ~= 1.26
 pillow ~= 10.4
 python-multipart ~= 0.0.9
 openai ~= 1.40
+pymilvus == 2.6.3
+sentence-transformers == 3.3.1

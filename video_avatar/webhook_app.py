@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import re
+import logging
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +13,7 @@ from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
 from db import insert_call_transcript, insert_job_requirements, update_call_transcript
+from milvus_job_postings import check_milvus_connection, insert_job_postings
 
 
 load_dotenv()
@@ -21,11 +24,38 @@ app = FastAPI(title="Bey Webhook")
 
 _client: Optional[AsyncOpenAI] = None
 
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stdout,
+    format="%(message)s",
+)
+logger = logging.getLogger("bey_webhook")
+
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST",
     "Access-Control-Allow-Headers": "Content-Type",
 }
+
+
+def _log_event(level: str, message: str, **fields: Any) -> None:
+    payload = {"message": message, **fields}
+    record = json.dumps(payload, ensure_ascii=True)
+    if level == "warning":
+        logger.warning(record)
+    elif level == "error":
+        logger.error(record)
+    else:
+        logger.info(record)
+
+
+@app.on_event("startup")
+async def startup_checks() -> None:
+    ok, detail = check_milvus_connection()
+    if ok:
+        _log_event("info", "milvus_health_check_ok")
+    else:
+        _log_event("error", "milvus_health_check_failed", error=detail)
 
 
 def _openai_client() -> AsyncOpenAI:
@@ -349,10 +379,12 @@ async def _process_call(payload: Dict[str, Any]) -> None:
     messages = payload.get("messages") or []
     cleaned = _clean_transcript(messages)
     redacted = _redact_pii(cleaned)
+    _log_event("info", "call_processing_started", call_id=call_id, message_count=len(messages))
 
     try:
         llm_text = await _call_llm(cleaned)
     except Exception as exc:
+        _log_event("error", "llm_call_failed", call_id=call_id, error=str(exc))
         await update_call_transcript(
             call_id,
             status="failed_parse",
@@ -362,6 +394,7 @@ async def _process_call(payload: Dict[str, Any]) -> None:
 
     parsed = _parse_json(llm_text)
     if parsed is None:
+        _log_event("error", "llm_invalid_json", call_id=call_id)
         await update_call_transcript(
             call_id,
             status="failed_parse",
@@ -370,6 +403,7 @@ async def _process_call(payload: Dict[str, Any]) -> None:
         return
 
     if not isinstance(parsed, dict):
+        _log_event("error", "llm_invalid_wrapper", call_id=call_id)
         await update_call_transcript(
             call_id,
             status="failed_parse",
@@ -379,6 +413,7 @@ async def _process_call(payload: Dict[str, Any]) -> None:
 
     roles_raw = parsed.get("roles")
     if not isinstance(roles_raw, list) or not roles_raw:
+        _log_event("error", "llm_missing_roles", call_id=call_id)
         await update_call_transcript(
             call_id,
             status="failed_parse",
@@ -403,6 +438,7 @@ async def _process_call(payload: Dict[str, Any]) -> None:
         roles.append(role_copy)
 
     if not roles:
+        _log_event("error", "llm_no_valid_roles", call_id=call_id)
         await update_call_transcript(
             call_id,
             status="failed_parse",
@@ -456,6 +492,7 @@ async def _process_call(payload: Dict[str, Any]) -> None:
             dedupe_call_id=call_id,
         )
     except Exception as exc:
+        _log_event("error", "job_insert_failed", call_id=call_id, error=str(exc))
         await update_call_transcript(
             call_id,
             status="failed_parse",
@@ -463,11 +500,26 @@ async def _process_call(payload: Dict[str, Any]) -> None:
         )
         return
 
+    milvus_error = None
+    try:
+        inserted = insert_job_postings(role_payloads)
+        _log_event("info", "milvus_job_postings_inserted", call_id=call_id, count=inserted)
+    except Exception as exc:
+        milvus_error = f"Milvus insert failed: {exc}"
+        _log_event("error", "milvus_insert_failed", call_id=call_id, error=str(exc))
+
     await update_call_transcript(
         call_id,
         parsed_requirements=wrapper,
         status="parsed",
-        error_message=None,
+        error_message=milvus_error,
+    )
+    _log_event(
+        "info",
+        "call_processing_complete",
+        call_id=call_id,
+        role_count=len(role_payloads),
+        warning_count=len(parse_warnings),
     )
 
 
@@ -477,13 +529,16 @@ async def webhook(request: Request):
     event_type = payload.get("event_type")
 
     if event_type == "test":
+        _log_event("info", "webhook_test", event_type=event_type)
         return JSONResponse({"status": "ok"}, headers=CORS_HEADERS)
 
     if event_type != "call_ended":
+        _log_event("info", "webhook_ignored", event_type=event_type)
         return JSONResponse({"status": "ignored"}, headers=CORS_HEADERS)
 
     call_id = payload.get("call_id")
     if not call_id:
+        _log_event("warning", "webhook_missing_call_id")
         return JSONResponse({"status": "missing_call_id"}, headers=CORS_HEADERS)
 
     agent_id = payload.get("agent_id")
@@ -512,12 +567,30 @@ async def webhook(request: Request):
     try:
         await insert_call_transcript(record)
     except Exception as exc:
+        _log_event("error", "call_transcript_insert_failed", call_id=call_id, error=str(exc))
         return JSONResponse({"status": "db_error", "error": str(exc)}, headers=CORS_HEADERS)
 
+    _log_event("info", "webhook_received", call_id=call_id, event_type=event_type)
     asyncio.create_task(_process_call(payload))
     return JSONResponse({"status": "accepted"}, headers=CORS_HEADERS)
+
+
+@app.get("/webhook")
+async def webhook_get() -> JSONResponse:
+    return JSONResponse(
+        {
+            "status": "ok",
+            "message": "Webhook endpoint is ready. Send POST events to /webhook.",
+        },
+        headers=CORS_HEADERS,
+    )
 
 
 @app.options("/webhook")
 async def webhook_options() -> Response:
     return Response(status_code=204, headers=CORS_HEADERS)
+
+
+@app.get("/health")
+async def health() -> JSONResponse:
+    return JSONResponse({"status": "ok"})

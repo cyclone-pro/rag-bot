@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 def _parse_timestamp(value: Any) -> int:
     if not value:
         return 0
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
     if isinstance(value, (int, float)):
         value_int = int(value)
         return int(value_int / 1000) if value_int > 1_000_000_000_000 else value_int
@@ -39,6 +44,24 @@ def _parse_timestamp(value: Any) -> int:
         except Exception:
             return 0
     return 0
+
+
+async def _fetch_interview_metadata(interview_id: str) -> Dict[str, Any]:
+    """Fetch job info and scheduled time from Postgres."""
+    async with get_db_session() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT job_id, job_title, job_description, scheduled_time, created_at
+                FROM interviews
+                WHERE interview_id = :interview_id
+                LIMIT 1
+                """
+            ),
+            {"interview_id": interview_id},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else {}
 
 
 async def process_interview_transcript(
@@ -89,11 +112,15 @@ async def process_interview_transcript(
         milvus_service = get_milvus_service()
 
         job_data = conversation_data.get("job", {}) or {}
-        job_id = str(job_data.get("job_id") or "").strip()
-        job_title = str(job_data.get("title") or "").strip()
-        job_description = str(job_data.get("description") or "").strip()
+        db_meta = await _fetch_interview_metadata(interview_id)
+
+        job_id = str(job_data.get("job_id") or db_meta.get("job_id") or "").strip()
+        job_title = str(job_data.get("title") or db_meta.get("job_title") or "").strip()
+        job_description = str(job_data.get("description") or db_meta.get("job_description") or "").strip()
+
+        scheduled_time = db_meta.get("scheduled_time") or db_meta.get("created_at")
         interview_date = _parse_timestamp(
-            conversation_data.get("metadata", {}).get("start_time")
+            scheduled_time or conversation_data.get("metadata", {}).get("start_time")
         )
         
         # ✅ BATCH PROCESSING: Extract all answers first
