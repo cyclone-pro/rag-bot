@@ -234,6 +234,8 @@ class PreparedRow:
 
 # Columns we accept from the model JSON (output schema) + a few meta fields
 MODEL_COLUMNS = {
+    "source_call_id",
+    "job_id",
     "external_requisition_id",
     "job_title",
     "seniority_level",
@@ -391,6 +393,8 @@ def _prepare_role(role: Mapping[str, Any], metadata: Optional[Mapping[str, Any]]
 
     # Trim strings
     for sk in (
+        "source_call_id",
+        "job_id",
         "external_requisition_id",
         "job_title",
         "end_client_name",
@@ -521,7 +525,11 @@ async def insert_job_requirements(
                 meta = dict(metadata or {})
                 meta.setdefault("created_by", created_by)
                 meta.setdefault("source_type", source_type)
-                meta.setdefault("raw_json_input", role)
+                if dedupe_call_id:
+                    meta.setdefault("source_call_id", dedupe_call_id)
+                if "raw_json_input" not in meta:
+                    role_payload = role if isinstance(role, dict) else {}
+                    meta["raw_json_input"] = role_payload.get("raw_json_input", role)
 
                 # For multi-role calls with a single dedupe_call_id, keep unique-ish notes.
                 # If you want true idempotency per-role, include stable role id in model output.

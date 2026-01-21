@@ -1,11 +1,12 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
@@ -19,6 +20,12 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 app = FastAPI(title="Bey Webhook")
 
 _client: Optional[AsyncOpenAI] = None
+
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST",
+    "Access-Control-Allow-Headers": "Content-Type",
+}
 
 
 def _openai_client() -> AsyncOpenAI:
@@ -113,9 +120,10 @@ SYSTEM_PROMPT = f"""
 You extract structured job requirements from a transcript.
 
 Return ONLY valid JSON. No markdown. No commentary.
-Output either:
-- ONE JSON object (single role), OR
-- a JSON array of objects (multiple roles).
+Always return a JSON object with:
+- multi_role: boolean
+- roles: array of role objects (at least one)
+- parse_warnings: array (can be empty)
 
 If job_title is missing, infer it from the transcript. If still unknown, use "Unknown role".
 job_title max length is 200 chars; if longer, return the first 200 chars.
@@ -150,7 +158,27 @@ Important:
 - Do NOT invent data.
 - Arrays must be JSON arrays (even if empty).
 - Use null for missing optional fields.
+- parse_warnings must be present (use [] when none).
 """.strip()
+
+FILLER_RE = re.compile(
+    r"(?i)\b(?:um+|uh+|ah+|er+|hmm+|okay|alright|yeah|yep|so|like)\b(?=\s*(?:[.,!?]|$))"
+)
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+PHONE_RE = re.compile(
+    r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b"
+)
+
+
+def _remove_fillers(text: str) -> str:
+    cleaned = FILLER_RE.sub("", text)
+    return " ".join(cleaned.split())
+
+
+def _redact_pii(text: str) -> str:
+    redacted = EMAIL_RE.sub("[redacted]", text)
+    redacted = PHONE_RE.sub("[redacted]", redacted)
+    return redacted
 
 
 def _clean_transcript(messages: Any) -> str:
@@ -164,6 +192,7 @@ def _clean_transcript(messages: Any) -> str:
         if not isinstance(text, str):
             continue
         cleaned = " ".join(text.split())
+        cleaned = _remove_fillers(cleaned)
         if not cleaned:
             continue
         if (cleaned.startswith("{") and cleaned.endswith("}")) or (
@@ -171,11 +200,75 @@ def _clean_transcript(messages: Any) -> str:
         ):
             continue
         sender = msg.get("sender")
+        if isinstance(sender, str) and sender.lower() == "ai":
+            sender = "agent"
         if isinstance(sender, str) and sender.strip():
             lines.append(f"{sender.strip()}: {cleaned}")
         else:
             lines.append(cleaned)
     return "\n".join(lines)
+
+
+def _coerce_enum_value(value: Any, allowed: List[str], default: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return default
+    if value not in allowed:
+        return default
+    return value
+
+
+def _normalize_role_enums(role: Dict[str, Any], *, role_index: int) -> List[str]:
+    warnings: List[str] = []
+
+    for field, allowed, default in (
+        ("seniority_level", ENUMS["seniority_level"], "unspecified"),
+        ("job_type", ENUMS["job_type"], "unspecified"),
+        ("submission_urgency", ENUMS["submission_urgency"], "normal"),
+        ("work_model", ENUMS["work_model"], "unspecified"),
+        ("pay_rate_unit", ENUMS["pay_rate_unit"], "unspecified"),
+        ("employment_type", ENUMS["employment_type"], "unspecified"),
+    ):
+        raw_value = role.get(field)
+        coerced = _coerce_enum_value(raw_value, allowed, default)
+        if raw_value is not None and coerced != raw_value:
+            warnings.append(f"role[{role_index}] {field} invalid; set to {coerced}")
+            role[field] = coerced
+
+    for field in ("allowed_work_auth", "not_allowed_work_auth"):
+        raw_values = role.get(field)
+        if raw_values is None:
+            continue
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        if not isinstance(raw_values, list):
+            warnings.append(f"role[{role_index}] {field} invalid; set to Any")
+            role[field] = ["Any"]
+            continue
+        cleaned = [val for val in raw_values if isinstance(val, str) and val in ENUMS["work_authorization"]]
+        if not cleaned:
+            warnings.append(f"role[{role_index}] {field} invalid; set to Any")
+            role[field] = ["Any"]
+        else:
+            if len(cleaned) != len(raw_values):
+                warnings.append(f"role[{role_index}] {field} invalid entries removed")
+            role[field] = cleaned
+
+    return warnings
+
+
+def _normalize_pay_rates(role: Dict[str, Any], *, role_index: int) -> List[str]:
+    warnings: List[str] = []
+    pay_min = role.get("pay_rate_min")
+    pay_max = role.get("pay_rate_max")
+    if pay_min is None and pay_max is not None:
+        role["pay_rate_min"] = pay_max
+        warnings.append(f"role[{role_index}] pay_rate_min missing; set to pay_rate_max")
+    elif pay_max is None and pay_min is not None:
+        role["pay_rate_max"] = pay_min
+        warnings.append(f"role[{role_index}] pay_rate_max missing; set to pay_rate_min")
+    return warnings
 
 
 def _parse_json(text: str) -> Optional[Any]:
@@ -255,6 +348,7 @@ async def _process_call(payload: Dict[str, Any]) -> None:
 
     messages = payload.get("messages") or []
     cleaned = _clean_transcript(messages)
+    redacted = _redact_pii(cleaned)
 
     try:
         llm_text = await _call_llm(cleaned)
@@ -275,28 +369,76 @@ async def _process_call(payload: Dict[str, Any]) -> None:
         )
         return
 
-    roles: List[Dict[str, Any]]
-    if isinstance(parsed, list):
-        roles = [r for r in parsed if isinstance(r, dict)]
-    elif isinstance(parsed, dict):
-        roles = [parsed]
-    else:
+    if not isinstance(parsed, dict):
         await update_call_transcript(
             call_id,
             status="failed_parse",
-            error_message="LLM output JSON must be object or array",
+            error_message="LLM output JSON must be a wrapper object",
         )
         return
 
-    warnings: List[str] = []
-    for idx, role in enumerate(roles):
-        warnings.extend(_apply_length_rules(role, role_index=idx))
+    roles_raw = parsed.get("roles")
+    if not isinstance(roles_raw, list) or not roles_raw:
+        await update_call_transcript(
+            call_id,
+            status="failed_parse",
+            error_message="LLM output missing roles list",
+        )
+        return
 
-    notes = _build_notes(call_id, warnings)
+    parse_warnings = parsed.get("parse_warnings")
+    if not isinstance(parse_warnings, list):
+        parse_warnings = ["parse_warnings missing or invalid; initialized empty"]
+
+    roles: List[Dict[str, Any]] = []
+    for idx, role in enumerate(roles_raw):
+        if not isinstance(role, dict):
+            parse_warnings.append(f"role[{idx}] is not an object; skipped")
+            continue
+        role_copy = dict(role)
+        role_copy["job_id"] = f"{call_id}_{idx}"
+        parse_warnings.extend(_apply_length_rules(role_copy, role_index=idx))
+        parse_warnings.extend(_normalize_role_enums(role_copy, role_index=idx))
+        parse_warnings.extend(_normalize_pay_rates(role_copy, role_index=idx))
+        roles.append(role_copy)
+
+    if not roles:
+        await update_call_transcript(
+            call_id,
+            status="failed_parse",
+            error_message="LLM output contained no valid role objects",
+        )
+        return
+
+    multi_role = parsed.get("multi_role")
+    if not isinstance(multi_role, bool):
+        multi_role = len(roles) > 1
+
+    wrapper_roles = [dict(r) for r in roles]
+    wrapper = {
+        "multi_role": multi_role,
+        "roles": wrapper_roles,
+        "parse_warnings": parse_warnings,
+        "cleaned_transcript": redacted,
+        "source_call_id": call_id,
+        "extraction_version": "v1.5",
+    }
+
+    role_payloads: List[Dict[str, Any]] = []
+    for idx, role in enumerate(roles):
+        role_payload = dict(role)
+        role_payload["raw_json_input"] = {
+            **wrapper,
+            "role_index": idx,
+            "role_count": len(wrapper_roles),
+        }
+        role_payloads.append(role_payload)
+
+    notes = _build_notes(call_id, parse_warnings)
     metadata = {
-        "raw_json_input": {"cleaned_transcript": cleaned},
         "notes": notes,
         "phone_call_duration": None,
+        "source_call_id": call_id,
     }
 
     evaluation = payload.get("evaluation") or {}
@@ -307,10 +449,11 @@ async def _process_call(payload: Dict[str, Any]) -> None:
 
     try:
         await insert_job_requirements(
-            roles,
+            role_payloads,
             metadata=metadata,
             created_by="ava_ai_recruiter",
-            source_type="phone_interview",
+            source_type="beyond_presence",
+            dedupe_call_id=call_id,
         )
     except Exception as exc:
         await update_call_transcript(
@@ -322,7 +465,7 @@ async def _process_call(payload: Dict[str, Any]) -> None:
 
     await update_call_transcript(
         call_id,
-        parsed_requirements=parsed,
+        parsed_requirements=wrapper,
         status="parsed",
         error_message=None,
     )
@@ -334,14 +477,14 @@ async def webhook(request: Request):
     event_type = payload.get("event_type")
 
     if event_type == "test":
-        return JSONResponse({"status": "ok"})
+        return JSONResponse({"status": "ok"}, headers=CORS_HEADERS)
 
     if event_type != "call_ended":
-        return JSONResponse({"status": "ignored"})
+        return JSONResponse({"status": "ignored"}, headers=CORS_HEADERS)
 
     call_id = payload.get("call_id")
     if not call_id:
-        return JSONResponse({"status": "missing_call_id"})
+        return JSONResponse({"status": "missing_call_id"}, headers=CORS_HEADERS)
 
     agent_id = payload.get("agent_id")
     tags = payload.get("tags") if isinstance(payload.get("tags"), dict) else None
@@ -369,7 +512,12 @@ async def webhook(request: Request):
     try:
         await insert_call_transcript(record)
     except Exception as exc:
-        return JSONResponse({"status": "db_error", "error": str(exc)})
+        return JSONResponse({"status": "db_error", "error": str(exc)}, headers=CORS_HEADERS)
 
     asyncio.create_task(_process_call(payload))
-    return JSONResponse({"status": "accepted"})
+    return JSONResponse({"status": "accepted"}, headers=CORS_HEADERS)
+
+
+@app.options("/webhook")
+async def webhook_options() -> Response:
+    return Response(status_code=204, headers=CORS_HEADERS)

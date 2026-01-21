@@ -270,6 +270,7 @@ async def _insert_roles(roles: List[Dict[str, Any]], *, call_id: str, call_start
         "email_received_at": call_started_at,
         "source_type": "phone_interview",
         "created_by": "ava_ai_recruiter",
+        "source_call_id": call_id,
     }
     return await insert_job_requirements(
         roles,
