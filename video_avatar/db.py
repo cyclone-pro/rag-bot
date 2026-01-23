@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from urllib.parse import urlparse
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -95,10 +98,48 @@ CALL_TRANSCRIPT_JSON_COLUMNS = {
     "tags",
 }
 
+logger = logging.getLogger("bey_db")
+
+
+def _log_event(level: str, message: str, **fields: Any) -> None:
+    payload = {"message": message, **fields}
+    record = json.dumps(payload, ensure_ascii=True)
+    if level == "warning":
+        logger.warning(record)
+    elif level == "error":
+        logger.error(record)
+    else:
+        logger.info(record)
+
 
 # ---------------------------
 # Helpers
 # ---------------------------
+
+def _db_env_status() -> Dict[str, bool]:
+    return {
+        "DATABASE_URL_set": bool(os.getenv("DATABASE_URL")),
+        "PGHOST_set": bool(os.getenv("PGHOST")),
+        "PGDATABASE_set": bool(os.getenv("PGDATABASE")),
+        "PGUSER_set": bool(os.getenv("PGUSER")),
+        "PGPASSWORD_set": bool(os.getenv("PGPASSWORD")),
+        "PGPORT_set": bool(os.getenv("PGPORT")),
+    }
+
+
+def _db_info_from_url(db_url: str) -> Dict[str, Optional[str]]:
+    try:
+        parsed = urlparse(db_url)
+    except Exception:
+        return {"db_url_set": bool(db_url)}
+    return {
+        "db_scheme": parsed.scheme or None,
+        "db_host": parsed.hostname,
+        "db_port": str(parsed.port) if parsed.port else None,
+        "db_name": parsed.path.lstrip("/") if parsed.path else None,
+        "db_user": parsed.username,
+    }
+
 
 def _db_url_from_env() -> str:
     url = os.getenv("DATABASE_URL")
@@ -112,12 +153,31 @@ def _db_url_from_env() -> str:
     port = os.getenv("PGPORT", "5432")
 
     if not (host and db and user and pw):
+        _log_event("error", "db_env_missing", **_db_env_status())
         raise ValueError(
             "Set DATABASE_URL or PGHOST/PGDATABASE/PGUSER/PGPASSWORD (and optional PGPORT)"
         )
 
     # NOTE: basic URL; if you have special chars in password, url-encode it.
     return f"postgresql://{user}:{pw}@{host}:{port}/{db}"
+
+
+async def check_db_connection(timeout: float = 5.0) -> Tuple[bool, str]:
+    db_url = _db_url_from_env()
+    db_info = _db_info_from_url(db_url)
+    try:
+        try:
+            conn = await AsyncConnection.connect(db_url, connect_timeout=timeout)
+        except TypeError:
+            conn = await AsyncConnection.connect(db_url)
+        async with conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+                await cur.fetchone()
+        return True, "ok"
+    except Exception as exc:
+        _log_event("error", "db_health_failed", error=str(exc), **db_info)
+        return False, str(exc)
 
 
 def _strip_or_none(v: Any) -> Optional[str]:
@@ -505,57 +565,71 @@ async def insert_job_requirements(
         dedupe_key = f"bey_call_id:{dedupe_call_id}"
 
     db_url = _db_url_from_env()
+    db_info = _db_info_from_url(db_url)
+    _log_event("info", "db_connecting", **db_info)
     results: List[Tuple[str, str]] = []
 
-    async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
-        async with conn.cursor() as cur:
-            # if dedupe key exists, short-circuit
-            if dedupe_key:
-                await cur.execute(
-                    "SELECT id, job_id FROM job_requirements WHERE notes = %s ORDER BY created_at DESC LIMIT 1",
-                    (dedupe_key,),
-                )
-                existing = await cur.fetchone()
-                if existing:
-                    # Already processed this call; return that row.
-                    return [(existing["id"], existing["job_id"])]
-
-            for idx, role in enumerate(roles):
-                # store raw payload JSON in raw_json_input always
-                meta = dict(metadata or {})
-                meta.setdefault("created_by", created_by)
-                meta.setdefault("source_type", source_type)
-                if dedupe_call_id:
-                    meta.setdefault("source_call_id", dedupe_call_id)
-                if "raw_json_input" not in meta:
-                    role_payload = role if isinstance(role, dict) else {}
-                    meta["raw_json_input"] = role_payload.get("raw_json_input", role)
-
-                # For multi-role calls with a single dedupe_call_id, keep unique-ish notes.
-                # If you want true idempotency per-role, include stable role id in model output.
+    try:
+        async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
+            async with conn.cursor() as cur:
+                # if dedupe key exists, short-circuit
                 if dedupe_key:
-                    meta["notes"] = dedupe_key if idx == 0 else f"{dedupe_key}#role{idx}"
+                    await cur.execute(
+                        "SELECT id, job_id FROM job_requirements WHERE notes = %s ORDER BY created_at DESC LIMIT 1",
+                        (dedupe_key,),
+                    )
+                    existing = await cur.fetchone()
+                    if existing:
+                        _log_event(
+                            "info",
+                            "db_insert_job_requirements_deduped",
+                            dedupe_key=dedupe_key,
+                            job_id=existing["job_id"],
+                            **db_info,
+                        )
+                        # Already processed this call; return that row.
+                        return [(existing["id"], existing["job_id"])]
 
-                prepared = _prepare_role(role, meta)
+                for idx, role in enumerate(roles):
+                    # store raw payload JSON in raw_json_input always
+                    meta = dict(metadata or {})
+                    meta.setdefault("created_by", created_by)
+                    meta.setdefault("source_type", source_type)
+                    if dedupe_call_id:
+                        meta.setdefault("source_call_id", dedupe_call_id)
+                    if "raw_json_input" not in meta:
+                        role_payload = role if isinstance(role, dict) else {}
+                        meta["raw_json_input"] = role_payload.get("raw_json_input", role)
 
-                ins = _build_insert(prepared)
+                    # For multi-role calls with a single dedupe_call_id, keep unique-ish notes.
+                    # If you want true idempotency per-role, include stable role id in model output.
+                    if dedupe_key:
+                        meta["notes"] = dedupe_key if idx == 0 else f"{dedupe_key}#role{idx}"
 
-                if not ins.columns:
-                    # Should never happen; but avoid invalid SQL.
-                    continue
+                    prepared = _prepare_role(role, meta)
 
-                query = SQL("INSERT INTO job_requirements ({cols}) VALUES ({vals}) RETURNING id, job_id").format(
-                    cols=SQL(", ").join(Identifier(c) for c in ins.columns),
-                    vals=SQL(", ").join(SQL(p) for p in ins.placeholders),
-                )
+                    ins = _build_insert(prepared)
 
-                await cur.execute(query, ins.values)
-                row = await cur.fetchone()
-                results.append((row["id"], row["job_id"]))
+                    if not ins.columns:
+                        # Should never happen; but avoid invalid SQL.
+                        continue
 
-            await conn.commit()
+                    query = SQL("INSERT INTO job_requirements ({cols}) VALUES ({vals}) RETURNING id, job_id").format(
+                        cols=SQL(", ").join(Identifier(c) for c in ins.columns),
+                        vals=SQL(", ").join(SQL(p) for p in ins.placeholders),
+                    )
 
-    return results
+                    await cur.execute(query, ins.values)
+                    row = await cur.fetchone()
+                    results.append((row["id"], row["job_id"]))
+
+                await conn.commit()
+
+        _log_event("info", "db_insert_job_requirements_ok", rows=len(results), **db_info)
+        return results
+    except Exception as exc:
+        _log_event("error", "db_insert_job_requirements_failed", error=str(exc), **db_info)
+        raise
 
 
 async def insert_call_transcript(
@@ -592,10 +666,23 @@ async def insert_call_transcript(
     )
 
     db_url = _db_url_from_env()
-    async with await AsyncConnection.connect(db_url) as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(query, vals)
-            await conn.commit()
+    db_info = _db_info_from_url(db_url)
+    _log_event("info", "db_connecting", **db_info)
+    try:
+        async with await AsyncConnection.connect(db_url) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, vals)
+                await conn.commit()
+        _log_event("info", "db_insert_call_transcript_ok", call_id=data.get("call_id"), **db_info)
+    except Exception as exc:
+        _log_event(
+            "error",
+            "db_insert_call_transcript_failed",
+            call_id=data.get("call_id"),
+            error=str(exc),
+            **db_info,
+        )
+        raise
 
 
 async def update_call_transcript(
@@ -642,7 +729,20 @@ async def update_call_transcript(
     )
 
     db_url = _db_url_from_env()
-    async with await AsyncConnection.connect(db_url) as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(query, values)
-            await conn.commit()
+    db_info = _db_info_from_url(db_url)
+    _log_event("info", "db_connecting", **db_info)
+    try:
+        async with await AsyncConnection.connect(db_url) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, values)
+                await conn.commit()
+        _log_event("info", "db_update_call_transcript_ok", call_id=call_id, **db_info)
+    except Exception as exc:
+        _log_event(
+            "error",
+            "db_update_call_transcript_failed",
+            call_id=call_id,
+            error=str(exc),
+            **db_info,
+        )
+        raise

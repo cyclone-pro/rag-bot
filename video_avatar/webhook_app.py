@@ -5,6 +5,7 @@ import re
 import logging
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -12,11 +13,10 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-from db import insert_call_transcript, insert_job_requirements, update_call_transcript
+load_dotenv(Path(__file__).with_name(".env"))
+
+from db import check_db_connection, insert_call_transcript, insert_job_requirements, update_call_transcript
 from milvus_job_postings import check_milvus_connection, insert_job_postings
-
-
-load_dotenv()
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
@@ -51,11 +51,14 @@ def _log_event(level: str, message: str, **fields: Any) -> None:
 
 @app.on_event("startup")
 async def startup_checks() -> None:
-    ok, detail = check_milvus_connection()
-    if ok:
-        _log_event("info", "milvus_health_check_ok")
-    else:
-        _log_event("error", "milvus_health_check_failed", error=detail)
+    async def _run() -> None:
+        ok, detail = await asyncio.to_thread(check_milvus_connection)
+        if ok:
+            _log_event("info", "milvus_health_check_ok")
+        else:
+            _log_event("error", "milvus_health_check_failed", error=detail)
+
+    asyncio.create_task(_run())
 
 
 def _openai_client() -> AsyncOpenAI:
@@ -594,3 +597,19 @@ async def webhook_options() -> Response:
 @app.get("/health")
 async def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
+
+
+@app.get("/health/db")
+async def health_db() -> JSONResponse:
+    ok, detail = await check_db_connection()
+    status = "ok" if ok else "error"
+    status_code = 200 if ok else 503
+    return JSONResponse({"status": status, "detail": detail}, status_code=status_code)
+
+
+@app.get("/health/milvus")
+async def health_milvus() -> JSONResponse:
+    ok, detail = await asyncio.to_thread(check_milvus_connection)
+    status = "ok" if ok else "error"
+    status_code = 200 if ok else 503
+    return JSONResponse({"status": status, "detail": detail}, status_code=status_code)

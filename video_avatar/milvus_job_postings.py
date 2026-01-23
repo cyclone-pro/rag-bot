@@ -1,14 +1,19 @@
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from dotenv import load_dotenv
 from pymilvus import Collection, connections, utility
 from sentence_transformers import SentenceTransformer
 
+load_dotenv(Path(__file__).with_name(".env"))
 
+MILVUS_URI = os.getenv("MILVUS_URI")
+MILVUS_TOKEN = os.getenv("MILVUS_TOKEN")
 MILVUS_HOST = os.getenv("MILVUS_HOST")
 MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
-MILVUS_COLLECTION = os.getenv("MILVUS_JOB_COLLECTION", "job_postings")
+MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION") or os.getenv("MILVUS_JOB_COLLECTION", "job_postings")
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/e5-base-v2")
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
@@ -56,10 +61,28 @@ def _get_embedder() -> SentenceTransformer:
     return _EMBEDDER
 
 
+def _connect_milvus(alias: str, timeout: Optional[int] = None) -> None:
+    kwargs: Dict[str, Any] = {"alias": alias}
+    if MILVUS_URI:
+        kwargs["uri"] = MILVUS_URI
+        if MILVUS_TOKEN:
+            kwargs["token"] = MILVUS_TOKEN
+    else:
+        kwargs["host"] = MILVUS_HOST
+        kwargs["port"] = MILVUS_PORT
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    try:
+        connections.connect(**kwargs)
+    except TypeError:
+        kwargs.pop("timeout", None)
+        connections.connect(**kwargs)
+
+
 def _get_collection() -> Collection:
     global _COLLECTION
     if _COLLECTION is None:
-        connections.connect(alias="job_postings", host=MILVUS_HOST, port=MILVUS_PORT)
+        _connect_milvus("job_postings")
         if not utility.has_collection(MILVUS_COLLECTION, using="job_postings"):
             raise RuntimeError(f"Milvus collection not found: {MILVUS_COLLECTION}")
         _COLLECTION = Collection(MILVUS_COLLECTION, using="job_postings")
@@ -197,8 +220,8 @@ def _prepare_posting(role: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
 
 
 def insert_job_postings(roles: Iterable[Dict[str, Any]]) -> int:
-    if not MILVUS_HOST:
-        raise RuntimeError("MILVUS_HOST is not configured")
+    if not MILVUS_URI and not MILVUS_HOST:
+        raise RuntimeError("MILVUS_URI or MILVUS_HOST is not configured")
 
     role_list = [r for r in roles if isinstance(r, dict)]
     if not role_list:
@@ -235,11 +258,11 @@ def insert_job_postings(roles: Iterable[Dict[str, Any]]) -> int:
     return len(postings)
 
 
-def check_milvus_connection() -> Tuple[bool, str]:
-    if not MILVUS_HOST:
-        return False, "MILVUS_HOST not configured"
+def check_milvus_connection(timeout: int = 5) -> Tuple[bool, str]:
+    if not MILVUS_URI and not MILVUS_HOST:
+        return False, "MILVUS_URI or MILVUS_HOST not configured"
     try:
-        connections.connect(alias="job_postings_health", host=MILVUS_HOST, port=MILVUS_PORT)
+        _connect_milvus("job_postings_health", timeout=timeout)
         if not utility.has_collection(MILVUS_COLLECTION, using="job_postings_health"):
             return False, f"collection not found: {MILVUS_COLLECTION}"
     except Exception as exc:
