@@ -572,41 +572,39 @@ async def insert_job_requirements(
     try:
         async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
             async with conn.cursor() as cur:
-                # if dedupe key exists, short-circuit
+            for idx, role in enumerate(roles):
+                # store raw payload JSON in raw_json_input always
+                meta = dict(metadata or {})
+                meta.setdefault("created_by", created_by)
+                meta.setdefault("source_type", source_type)
+                if dedupe_call_id:
+                    meta.setdefault("source_call_id", dedupe_call_id)
+                if "raw_json_input" not in meta:
+                    role_payload = role if isinstance(role, dict) else {}
+                    meta["raw_json_input"] = role_payload.get("raw_json_input", role)
+
+                # For multi-role calls with a single dedupe_call_id, keep unique-ish notes.
+                # If you want true idempotency per-role, include stable role id in model output.
                 if dedupe_key:
+                    role_note = dedupe_key if idx == 0 else f"{dedupe_key}#role{idx}"
+                    meta["notes"] = role_note
                     await cur.execute(
                         "SELECT id, job_id FROM job_requirements WHERE notes = %s ORDER BY created_at DESC LIMIT 1",
-                        (dedupe_key,),
+                        (role_note,),
                     )
                     existing = await cur.fetchone()
                     if existing:
                         _log_event(
                             "info",
                             "db_insert_job_requirements_deduped",
-                            dedupe_key=dedupe_key,
+                            dedupe_key=role_note,
                             job_id=existing["job_id"],
+                            role_index=idx,
                             **db_info,
                         )
-                        # Already processed this call; return that row.
-                        return [(existing["id"], existing["job_id"])]
+                        continue
 
-                for idx, role in enumerate(roles):
-                    # store raw payload JSON in raw_json_input always
-                    meta = dict(metadata or {})
-                    meta.setdefault("created_by", created_by)
-                    meta.setdefault("source_type", source_type)
-                    if dedupe_call_id:
-                        meta.setdefault("source_call_id", dedupe_call_id)
-                    if "raw_json_input" not in meta:
-                        role_payload = role if isinstance(role, dict) else {}
-                        meta["raw_json_input"] = role_payload.get("raw_json_input", role)
-
-                    # For multi-role calls with a single dedupe_call_id, keep unique-ish notes.
-                    # If you want true idempotency per-role, include stable role id in model output.
-                    if dedupe_key:
-                        meta["notes"] = dedupe_key if idx == 0 else f"{dedupe_key}#role{idx}"
-
-                    prepared = _prepare_role(role, meta)
+                prepared = _prepare_role(role, meta)
 
                     ins = _build_insert(prepared)
 
@@ -619,9 +617,17 @@ async def insert_job_requirements(
                         vals=SQL(", ").join(SQL(p) for p in ins.placeholders),
                     )
 
-                    await cur.execute(query, ins.values)
-                    row = await cur.fetchone()
-                    results.append((row["id"], row["job_id"]))
+                await cur.execute(query, ins.values)
+                row = await cur.fetchone()
+                results.append((row["id"], row["job_id"]))
+                _log_event(
+                    "info",
+                    "db_insert_job_requirements_row",
+                    job_id=prepared.get("job_id"),
+                    job_title=prepared.get("job_title"),
+                    role_index=idx,
+                    **db_info,
+                )
 
                 await conn.commit()
 

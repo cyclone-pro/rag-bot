@@ -74,7 +74,9 @@ Ask questions BASED ON CONTEXT, not blindly.
 Examples:
 • If role is Full-time → ask about:
   - salary range (if not given)
-  - bonus, annual hike, equity, benefits (only if natural)
+  - bonus, annual hike, equity
+  - PTO days, health insurance, sign-on bonus
+  - relocation assistance (and amount if offered)
 • If role is Contract → ask about:
   - hourly rate
   - duration

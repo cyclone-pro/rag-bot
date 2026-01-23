@@ -99,6 +99,8 @@ STRING_LIMITS = {
     "status": 50,
 }
 
+RATE_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
 
 ENUMS = {
     "seniority_level": [
@@ -161,6 +163,25 @@ Always return a JSON object with:
 If job_title is missing, infer it from the transcript. If still unknown, use "Unknown role".
 job_title max length is 200 chars; if longer, return the first 200 chars.
 
+If pay rate is stated as a single value (e.g., "$60/hr"), set BOTH pay_rate_min and
+pay_rate_max to that value. If a range is stated (e.g., "$50-$60/hr"), set pay_rate_min
+to the lower value and pay_rate_max to the higher value. Always set pay_rate_currency
+and pay_rate_unit when pay rate is mentioned.
+
+Always populate these arrays (use [] if none):
+- must_have_skills
+- nice_to_have_skills
+- primary_technologies
+- responsibilities
+- day_to_day
+- other_constraints
+- certifications_required
+- certifications_preferred
+- domains
+
+If the transcript mentions a minimum years-of-experience requirement, populate
+overall_min_years (and primary_role_min_years if it is role-specific).
+
 For any other string field that would exceed its column limit, return null.
 Do not truncate other fields.
 
@@ -222,6 +243,10 @@ def _clean_transcript(messages: Any) -> str:
         if not isinstance(msg, dict):
             continue
         text = msg.get("message")
+        if text is None:
+            text = msg.get("content")
+        if text is None:
+            text = msg.get("text")
         if not isinstance(text, str):
             continue
         cleaned = " ".join(text.split())
@@ -233,6 +258,8 @@ def _clean_transcript(messages: Any) -> str:
         ):
             continue
         sender = msg.get("sender")
+        if sender is None:
+            sender = msg.get("role")
         if isinstance(sender, str) and sender.lower() == "ai":
             sender = "agent"
         if isinstance(sender, str) and sender.strip():
@@ -295,6 +322,31 @@ def _normalize_pay_rates(role: Dict[str, Any], *, role_index: int) -> List[str]:
     warnings: List[str] = []
     pay_min = role.get("pay_rate_min")
     pay_max = role.get("pay_rate_max")
+    pay_currency = role.get("pay_rate_currency")
+    pay_unit = role.get("pay_rate_unit")
+
+    rate_hint = role.get("pay_rate")
+    if rate_hint is None:
+        rate_hint = role.get("pay_rate_range")
+    if rate_hint is None:
+        rate_hint = role.get("pay_rate_text")
+
+    parsed = _parse_pay_rate_hint(rate_hint)
+    if parsed:
+        parsed_min, parsed_max, parsed_currency, parsed_unit = parsed
+        if pay_min is None and parsed_min is not None:
+            role["pay_rate_min"] = parsed_min
+            pay_min = parsed_min
+        if pay_max is None and parsed_max is not None:
+            role["pay_rate_max"] = parsed_max
+            pay_max = parsed_max
+        if parsed_currency and not pay_currency:
+            role["pay_rate_currency"] = parsed_currency
+            pay_currency = parsed_currency
+        if parsed_unit and (pay_unit is None or pay_unit == "unspecified"):
+            role["pay_rate_unit"] = parsed_unit
+            pay_unit = parsed_unit
+
     if pay_min is None and pay_max is not None:
         role["pay_rate_min"] = pay_max
         warnings.append(f"role[{role_index}] pay_rate_min missing; set to pay_rate_max")
@@ -302,6 +354,49 @@ def _normalize_pay_rates(role: Dict[str, Any], *, role_index: int) -> List[str]:
         role["pay_rate_max"] = pay_min
         warnings.append(f"role[{role_index}] pay_rate_max missing; set to pay_rate_min")
     return warnings
+
+
+def _parse_pay_rate_hint(value: Any) -> Optional[Tuple[Optional[float], Optional[float], Optional[str], Optional[str]]]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value), float(value), None, None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    numbers = [float(x) for x in RATE_NUMBER_RE.findall(text)]
+    if not numbers:
+        return None
+    if len(numbers) >= 2:
+        low = min(numbers[0], numbers[1])
+        high = max(numbers[0], numbers[1])
+    else:
+        low = high = numbers[0]
+
+    lowered = text.lower()
+    currency = None
+    if "$" in text or "usd" in lowered:
+        currency = "USD"
+    elif "eur" in lowered:
+        currency = "EUR"
+    elif "gbp" in lowered or "pound" in lowered:
+        currency = "GBP"
+
+    unit = None
+    if re.search(r"/\s*hr|\bhr\b|hourly|per\s*hour", lowered):
+        unit = "hour"
+    elif "day" in lowered:
+        unit = "day"
+    elif "week" in lowered:
+        unit = "week"
+    elif "month" in lowered:
+        unit = "month"
+    elif "year" in lowered or "annual" in lowered:
+        unit = "year"
+
+    return low, high, currency, unit
 
 
 def _parse_json(text: str) -> Optional[Any]:

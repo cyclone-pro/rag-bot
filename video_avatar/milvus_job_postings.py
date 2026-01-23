@@ -1,10 +1,12 @@
+import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from dotenv import load_dotenv
-from pymilvus import Collection, connections, utility
+from pymilvus import Collection, DataType, connections, utility
 from sentence_transformers import SentenceTransformer
 
 load_dotenv(Path(__file__).with_name(".env"))
@@ -35,6 +37,20 @@ FIELD_LIMITS = {
 
 _EMBEDDER: Optional[SentenceTransformer] = None
 _COLLECTION: Optional[Collection] = None
+_COMPANY_ARRAY: Optional[bool] = None
+
+logger = logging.getLogger("bey_milvus")
+
+
+def _log_event(level: str, message: str, **fields: Any) -> None:
+    payload = {"message": message, **fields}
+    record = json.dumps(payload, ensure_ascii=True)
+    if level == "warning":
+        logger.warning(record)
+    elif level == "error":
+        logger.error(record)
+    else:
+        logger.info(record)
 
 
 def _truncate(value: Optional[str], limit: int) -> Optional[str]:
@@ -52,6 +68,13 @@ def _coerce_str(value: Any) -> Optional[str]:
         cleaned = value.strip()
         return cleaned or None
     return str(value)
+
+
+def _truncate_or_default(value: Optional[str], limit: int, default: str = "") -> str:
+    if value is None or value == "":
+        return default
+    truncated = _truncate(value, limit)
+    return truncated if truncated is not None else default
 
 
 def _get_embedder() -> SentenceTransformer:
@@ -87,6 +110,18 @@ def _get_collection() -> Collection:
             raise RuntimeError(f"Milvus collection not found: {MILVUS_COLLECTION}")
         _COLLECTION = Collection(MILVUS_COLLECTION, using="job_postings")
     return _COLLECTION
+
+
+def _company_is_array(collection: Collection) -> bool:
+    global _COMPANY_ARRAY
+    if _COMPANY_ARRAY is not None:
+        return _COMPANY_ARRAY
+    for field in collection.schema.fields:
+        if field.name == "company":
+            _COMPANY_ARRAY = field.dtype == DataType.ARRAY
+            return _COMPANY_ARRAY
+    _COMPANY_ARRAY = False
+    return _COMPANY_ARRAY
 
 
 def _build_location(role: Dict[str, Any]) -> Optional[str]:
@@ -159,13 +194,30 @@ def _build_jd_text(role: Dict[str, Any]) -> str:
 
     must = role.get("must_have_skills") or []
     if must:
-        parts.append("Must-have skills: " + ", ".join([str(x) for x in must]))
+        parts.append("Required skills: " + ", ".join([str(x) for x in must]))
     nice = role.get("nice_to_have_skills") or []
     if nice:
         parts.append("Nice-to-have skills: " + ", ".join([str(x) for x in nice]))
     primary = role.get("primary_technologies") or []
     if primary:
         parts.append("Primary technologies: " + ", ".join([str(x) for x in primary]))
+
+    cert_req = role.get("certifications_required") or []
+    if cert_req:
+        parts.append("Certifications required: " + ", ".join([str(x) for x in cert_req]))
+    cert_pref = role.get("certifications_preferred") or []
+    if cert_pref:
+        parts.append("Certifications preferred: " + ", ".join([str(x) for x in cert_pref]))
+    domains = role.get("domains") or []
+    if domains:
+        parts.append("Domains: " + ", ".join([str(x) for x in domains]))
+
+    overall_years = role.get("overall_min_years")
+    if overall_years is not None:
+        parts.append(f"Minimum experience: {overall_years} years")
+    primary_years = role.get("primary_role_min_years")
+    if primary_years is not None:
+        parts.append(f"Primary role experience: {primary_years} years")
 
     responsibilities = role.get("responsibilities") or []
     if responsibilities:
@@ -196,24 +248,24 @@ def _prepare_posting(role: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
     employment_type = _coerce_str(role.get("job_type")) or _coerce_str(role.get("employment_type"))
     tax_term = _coerce_str(role.get("employment_type"))
     salary_range = _build_salary_range(role)
-    req_id = _coerce_str(role.get("external_requisition_id")) or job_id
+    req_id = _coerce_str(role.get("external_requisition_id")) or ""
     status = _coerce_str(role.get("status")) or "active"
     posted_ts = int(time.time())
     jd_text = _build_jd_text(role)
 
     posting = {
         "job_id": job_id,
-        "title": title,
-        "company": _truncate(company, FIELD_LIMITS["company"]),
-        "department": _truncate(department, FIELD_LIMITS["department"]),
-        "location": _truncate(location, FIELD_LIMITS["location"]),
-        "employment_type": _truncate(employment_type, FIELD_LIMITS["employment_type"]),
-        "tax_term": _truncate(tax_term, FIELD_LIMITS["tax_term"]),
-        "salary_range": _truncate(salary_range, FIELD_LIMITS["salary_range"]),
-        "req_id": _truncate(req_id, FIELD_LIMITS["req_id"]),
-        "status": _truncate(status, FIELD_LIMITS["status"]),
+        "title": _truncate_or_default(title, FIELD_LIMITS["title"]),
+        "company": _truncate_or_default(company, FIELD_LIMITS["company"], default="Unknown"),
+        "department": _truncate_or_default(department, FIELD_LIMITS["department"]),
+        "location": _truncate_or_default(location, FIELD_LIMITS["location"]),
+        "employment_type": _truncate_or_default(employment_type, FIELD_LIMITS["employment_type"]),
+        "tax_term": _truncate_or_default(tax_term, FIELD_LIMITS["tax_term"]),
+        "salary_range": _truncate_or_default(salary_range, FIELD_LIMITS["salary_range"]),
+        "req_id": _truncate_or_default(req_id, FIELD_LIMITS["req_id"]),
+        "status": _truncate_or_default(status, FIELD_LIMITS["status"], default="active"),
         "posted_ts": posted_ts,
-        "jd_text": _truncate(jd_text, FIELD_LIMITS["jd_text"]),
+        "jd_text": _truncate_or_default(jd_text, FIELD_LIMITS["jd_text"], default="Job posting"),
     }
 
     return posting, posting["jd_text"] or ""
@@ -239,6 +291,18 @@ def insert_job_postings(roles: Iterable[Dict[str, Any]]) -> int:
     if not postings:
         return 0
 
+    sample_jobs = [
+        {"job_id": posting.get("job_id"), "title": posting.get("title")}
+        for posting in postings[:10]
+    ]
+    _log_event(
+        "info",
+        "milvus_insert_start",
+        count=len(postings),
+        sample_jobs=sample_jobs,
+        sample_truncated=len(postings) > 10,
+    )
+
     embedder = _get_embedder()
     inputs = [f"passage: {text}" for text in texts]
     vectors = embedder.encode(inputs, normalize_embeddings=True)
@@ -254,7 +318,12 @@ def insert_job_postings(roles: Iterable[Dict[str, Any]]) -> int:
         posting["jd_embedding"] = vector
 
     collection = _get_collection()
+    if _company_is_array(collection):
+        for posting in postings:
+            company_value = posting.get("company") or "Unknown"
+            posting["company"] = [company_value]
     collection.insert(postings)
+    _log_event("info", "milvus_insert_ok", count=len(postings))
     return len(postings)
 
 
