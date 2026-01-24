@@ -6,7 +6,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
@@ -15,7 +15,14 @@ from openai import AsyncOpenAI
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-from db import check_db_connection, insert_call_transcript, insert_job_requirements, update_call_transcript
+from db import (
+    append_call_message,
+    check_db_connection,
+    fetch_call_messages,
+    insert_call_transcript,
+    insert_job_requirements,
+    update_call_transcript,
+)
 from milvus_job_postings import check_milvus_connection, insert_job_postings
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -475,6 +482,12 @@ async def _process_call(payload: Dict[str, Any]) -> None:
         return
 
     messages = payload.get("messages") or []
+    if not messages:
+        stored_messages = await fetch_call_messages(call_id)
+        if stored_messages:
+            messages = stored_messages
+            payload["messages"] = stored_messages
+            _log_event("info", "call_loaded_messages", call_id=call_id, message_count=len(stored_messages))
     cleaned = _clean_transcript(messages)
     redacted = _redact_pii(cleaned)
     _log_event("info", "call_processing_started", call_id=call_id, message_count=len(messages))
@@ -630,6 +643,41 @@ async def webhook(request: Request):
         _log_event("info", "webhook_test", event_type=event_type)
         return JSONResponse({"status": "ok"}, headers=CORS_HEADERS)
 
+    if event_type == "message":
+        call_id = payload.get("call_id")
+        if not call_id:
+            _log_event("warning", "webhook_missing_call_id")
+            return JSONResponse({"status": "missing_call_id"}, headers=CORS_HEADERS)
+
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            _log_event("warning", "webhook_missing_message", call_id=call_id)
+            return JSONResponse({"status": "missing_message"}, headers=CORS_HEADERS)
+
+        call_data = payload.get("call_data") if isinstance(payload.get("call_data"), dict) else {}
+        agent_id = payload.get("agent_id") or call_data.get("agentId")
+        session_id = payload.get("session_id")
+        user_name = payload.get("user_name") or call_data.get("userName")
+        tags = payload.get("tags") if isinstance(payload.get("tags"), dict) else None
+
+        try:
+            await append_call_message(
+                call_id,
+                message=message,
+                agent_id=agent_id,
+                session_id=session_id,
+                user_name=user_name,
+                event_type=event_type,
+                tags=tags,
+                raw_payload=payload,
+            )
+        except Exception as exc:
+            _log_event("error", "call_message_append_failed", call_id=call_id, error=str(exc))
+            return JSONResponse({"status": "db_error", "error": str(exc)}, headers=CORS_HEADERS)
+
+        _log_event("info", "webhook_message_received", call_id=call_id)
+        return JSONResponse({"status": "received"}, headers=CORS_HEADERS)
+
     if event_type != "call_ended":
         _log_event("info", "webhook_ignored", event_type=event_type)
         return JSONResponse({"status": "ignored"}, headers=CORS_HEADERS)
@@ -670,6 +718,19 @@ async def webhook(request: Request):
 
     _log_event("info", "webhook_received", call_id=call_id, event_type=event_type)
     asyncio.create_task(_process_call(payload))
+    return JSONResponse({"status": "accepted"}, headers=CORS_HEADERS)
+
+
+@app.post("/webhook/finalize")
+async def webhook_finalize(request: Request):
+    payload = await request.json()
+    call_id = payload.get("call_id")
+    if not call_id:
+        _log_event("warning", "webhook_missing_call_id")
+        return JSONResponse({"status": "missing_call_id"}, headers=CORS_HEADERS)
+
+    _log_event("info", "webhook_finalize_received", call_id=call_id)
+    asyncio.create_task(_process_call({"call_id": call_id}))
     return JSONResponse({"status": "accepted"}, headers=CORS_HEADERS)
 
 

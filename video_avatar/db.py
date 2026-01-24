@@ -572,39 +572,39 @@ async def insert_job_requirements(
     try:
         async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
             async with conn.cursor() as cur:
-            for idx, role in enumerate(roles):
-                # store raw payload JSON in raw_json_input always
-                meta = dict(metadata or {})
-                meta.setdefault("created_by", created_by)
-                meta.setdefault("source_type", source_type)
-                if dedupe_call_id:
-                    meta.setdefault("source_call_id", dedupe_call_id)
-                if "raw_json_input" not in meta:
-                    role_payload = role if isinstance(role, dict) else {}
-                    meta["raw_json_input"] = role_payload.get("raw_json_input", role)
+                for idx, role in enumerate(roles):
+                    # store raw payload JSON in raw_json_input always
+                    meta = dict(metadata or {})
+                    meta.setdefault("created_by", created_by)
+                    meta.setdefault("source_type", source_type)
+                    if dedupe_call_id:
+                        meta.setdefault("source_call_id", dedupe_call_id)
+                    if "raw_json_input" not in meta:
+                        role_payload = role if isinstance(role, dict) else {}
+                        meta["raw_json_input"] = role_payload.get("raw_json_input", role)
 
-                # For multi-role calls with a single dedupe_call_id, keep unique-ish notes.
-                # If you want true idempotency per-role, include stable role id in model output.
-                if dedupe_key:
-                    role_note = dedupe_key if idx == 0 else f"{dedupe_key}#role{idx}"
-                    meta["notes"] = role_note
-                    await cur.execute(
-                        "SELECT id, job_id FROM job_requirements WHERE notes = %s ORDER BY created_at DESC LIMIT 1",
-                        (role_note,),
-                    )
-                    existing = await cur.fetchone()
-                    if existing:
-                        _log_event(
-                            "info",
-                            "db_insert_job_requirements_deduped",
-                            dedupe_key=role_note,
-                            job_id=existing["job_id"],
-                            role_index=idx,
-                            **db_info,
+                    # For multi-role calls with a single dedupe_call_id, keep unique-ish notes.
+                    # If you want true idempotency per-role, include stable role id in model output.
+                    if dedupe_key:
+                        role_note = dedupe_key if idx == 0 else f"{dedupe_key}#role{idx}"
+                        meta["notes"] = role_note
+                        await cur.execute(
+                            "SELECT id, job_id FROM job_requirements WHERE notes = %s ORDER BY created_at DESC LIMIT 1",
+                            (role_note,),
                         )
-                        continue
+                        existing = await cur.fetchone()
+                        if existing:
+                            _log_event(
+                                "info",
+                                "db_insert_job_requirements_deduped",
+                                dedupe_key=role_note,
+                                job_id=existing["job_id"],
+                                role_index=idx,
+                                **db_info,
+                            )
+                            continue
 
-                prepared = _prepare_role(role, meta)
+                    prepared = _prepare_role(role, meta)
 
                     ins = _build_insert(prepared)
 
@@ -617,17 +617,17 @@ async def insert_job_requirements(
                         vals=SQL(", ").join(SQL(p) for p in ins.placeholders),
                     )
 
-                await cur.execute(query, ins.values)
-                row = await cur.fetchone()
-                results.append((row["id"], row["job_id"]))
-                _log_event(
-                    "info",
-                    "db_insert_job_requirements_row",
-                    job_id=prepared.get("job_id"),
-                    job_title=prepared.get("job_title"),
-                    role_index=idx,
-                    **db_info,
-                )
+                    await cur.execute(query, ins.values)
+                    row = await cur.fetchone()
+                    results.append((row["id"], row["job_id"]))
+                    _log_event(
+                        "info",
+                        "db_insert_job_requirements_row",
+                        job_id=prepared.get("job_id"),
+                        job_title=prepared.get("job_title"),
+                        role_index=idx,
+                        **db_info,
+                    )
 
                 await conn.commit()
 
@@ -689,6 +689,107 @@ async def insert_call_transcript(
             **db_info,
         )
         raise
+
+
+async def append_call_message(
+    call_id: str,
+    *,
+    message: Mapping[str, Any],
+    agent_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    user_name: Optional[str] = None,
+    event_type: str = "message",
+    call_started_at: Optional[str] = None,
+    call_ended_at: Optional[str] = None,
+    tags: Optional[Dict[str, Any]] = None,
+    raw_payload: Optional[Any] = None,
+    table: str = CALL_TRANSCRIPTS_TABLE,
+) -> None:
+    if not call_id:
+        raise ValueError("call_id is required for call_transcripts append")
+
+    data: Dict[str, Any] = {
+        "call_id": call_id,
+        "agent_id": agent_id,
+        "session_id": session_id,
+        "user_name": user_name,
+        "event_type": event_type,
+        "call_started_at": call_started_at,
+        "call_ended_at": call_ended_at,
+        "messages": [dict(message)],
+        "raw_payload": raw_payload,
+        "tags": tags,
+        "status": "streaming",
+        "received_at": datetime.now(tz=timezone.utc),
+    }
+
+    cols: List[str] = []
+    ph: List[str] = []
+    vals: List[Any] = []
+    for k, v in data.items():
+        if v is None:
+            continue
+        cols.append(k)
+        ph.append("%s")
+        if k in CALL_TRANSCRIPT_JSON_COLUMNS:
+            vals.append(Jsonb(v))
+        else:
+            vals.append(v)
+
+    query = SQL(
+        "INSERT INTO {table} ({cols}) VALUES ({vals}) "
+        "ON CONFLICT (call_id) DO UPDATE SET "
+        "messages = COALESCE({table}.messages, '[]'::jsonb) || EXCLUDED.messages, "
+        "updated_at = NOW()"
+    ).format(
+        table=Identifier(table),
+        cols=SQL(", ").join(Identifier(c) for c in cols),
+        vals=SQL(", ").join(SQL(p) for p in ph),
+    )
+
+    db_url = _db_url_from_env()
+    db_info = _db_info_from_url(db_url)
+    _log_event("info", "db_connecting", **db_info)
+    try:
+        async with await AsyncConnection.connect(db_url) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, vals)
+                await conn.commit()
+        _log_event("info", "db_append_call_message_ok", call_id=call_id, **db_info)
+    except Exception as exc:
+        _log_event(
+            "error",
+            "db_append_call_message_failed",
+            call_id=call_id,
+            error=str(exc),
+            **db_info,
+        )
+        raise
+
+
+async def fetch_call_messages(
+    call_id: str,
+    *,
+    table: str = CALL_TRANSCRIPTS_TABLE,
+) -> List[Any]:
+    if not call_id:
+        return []
+    query = SQL("SELECT messages FROM {table} WHERE call_id = %s").format(table=Identifier(table))
+    db_url = _db_url_from_env()
+    db_info = _db_info_from_url(db_url)
+    _log_event("info", "db_connecting", **db_info)
+    try:
+        async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (call_id,))
+                row = await cur.fetchone()
+                if not row:
+                    return []
+                messages = row.get("messages") or []
+                return messages if isinstance(messages, list) else []
+    except Exception as exc:
+        _log_event("error", "db_fetch_call_messages_failed", call_id=call_id, error=str(exc), **db_info)
+        return []
 
 
 async def update_call_transcript(
