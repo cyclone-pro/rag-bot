@@ -1,771 +1,520 @@
+"""Beyond Presence Webhook Handler for RecruiterBrain."""
+
 import asyncio
 import json
+import logging
 import os
 import re
-import logging
 import sys
+import time
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-load_dotenv(Path(__file__).with_name(".env"))
-
 from db import (
-    append_call_message,
-    check_db_connection,
-    fetch_call_messages,
-    insert_call_transcript,
-    insert_job_requirements,
-    update_call_transcript,
+    check_db_connection, insert_call_transcript, fetch_call_transcript, update_call_transcript,
+    insert_job_requirement, update_job_milvus_status, fetch_unsynced_jobs,
+    insert_processing_log, fetch_processing_logs, fetch_stats, fetch_failed_calls,
 )
-from milvus_job_postings import check_milvus_connection, insert_job_postings
+from milvus_job_postings import (
+    check_milvus_connection, generate_embedding, search_similar_jobs, 
+    insert_job_posting, _build_jd_text, sync_jobs_to_milvus,
+)
+from bey_client import build_webhook_payload
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.90"))
+MAX_SIMILAR_JOBS = int(os.getenv("MAX_SIMILAR_JOBS", "3"))
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
-app = FastAPI(title="Bey Webhook")
+app = FastAPI(title="Beyond Presence Webhook", version="2.0.0")
+_openai: Optional[AsyncOpenAI] = None
 
-_client: Optional[AsyncOpenAI] = None
-
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stdout,
-    format="%(message)s",
-)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
 logger = logging.getLogger("bey_webhook")
 
-CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST",
-    "Access-Control-Allow-Headers": "Content-Type",
-}
+CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, X-Admin-Key"}
 
-
-def _log_event(level: str, message: str, **fields: Any) -> None:
-    payload = {"message": message, **fields}
-    record = json.dumps(payload, ensure_ascii=True)
-    if level == "warning":
-        logger.warning(record)
-    elif level == "error":
-        logger.error(record)
-    else:
-        logger.info(record)
-
-
-@app.on_event("startup")
-async def startup_checks() -> None:
-    async def _run() -> None:
-        ok, detail = await asyncio.to_thread(check_milvus_connection)
-        if ok:
-            _log_event("info", "milvus_health_check_ok")
-        else:
-            _log_event("error", "milvus_health_check_failed", error=detail)
-
-    asyncio.create_task(_run())
-
+def _log(level: str, msg: str, **kw: Any) -> None:
+    getattr(logger, level if level in ("warning", "error") else "info")(json.dumps({"message": msg, **kw}))
 
 def _openai_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY is required for LLM parsing")
-        _client = AsyncOpenAI(api_key=api_key)
-    return _client
+    global _openai
+    if _openai is None:
+        _openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    return _openai
 
+SYSTEM_PROMPT = '''You extract structured job requirements from recruitment call transcripts.
+CRITICAL: Return ONLY valid JSON. No markdown, no commentary.
 
-STRING_LIMITS = {
-    "job_id": 100,
-    "external_requisition_id": 100,
-    "job_title": 200,
-    "end_client_name": 200,
-    "client_name": 200,
-    "industry": 100,
-    "location_country": 3,
-    "pay_rate_currency": 3,
-    "salary_currency": 3,
-    "bonus_type": 50,
-    "equity_type": 50,
-    "contract_duration_text": 100,
-    "citizenship_required": 50,
-    "security_clearance_level": 50,
-    "work_hours": 100,
-    "time_zone": 50,
-    "vendor_name": 200,
-    "vendor_contact_name": 200,
-    "vendor_contact_email": 200,
-    "vendor_contact_phone": 20,
-    "email_subject": 500,
-    "email_sender": 200,
-    "created_by": 100,
-    "source_type": 50,
-    "status": 50,
+OUTPUT SCHEMA:
+{
+  "multi_role": boolean,
+  "roles": [
+    {
+      "job_title": "string REQUIRED max 200 chars",
+      "external_requisition_id": "string or null",
+      "positions_available": integer default 1,
+      "max_candidates_allowed": integer or null,
+      
+      "seniority_level": "Entry|Mid|Senior|Lead|Architect|Manager|Director|VP|C-level|unspecified",
+      "job_type": "Contract|Contract-to-hire|Full-time|Part-time|Internship|Other|unspecified",
+      "submission_urgency": "normal|urgent|flexible",
+      "work_model": "onsite|remote|hybrid|flexible|unspecified",
+      "pay_rate_unit": "hour|day|week|month|year|unspecified",
+      "employment_type": "C2C|W2|1099|unspecified",
+      
+      "location_cities": ["array of city names"],
+      "location_states": ["array of state codes - MUST match cities length"],
+      "location_country": "string default US",
+      "work_model_details": "string or null",
+      
+      "pay_rate_min": number or null,
+      "pay_rate_max": number or null,
+      "pay_rate_currency": "USD",
+      "is_rate_strict": boolean or null,
+      "pay_rate_notes": "string or null",
+      
+      "salary_min": number or null,
+      "salary_max": number or null,
+      "salary_currency": "USD",
+      
+      "bonus_percentage_min": number or null,
+      "bonus_percentage_max": number or null,
+      "bonus_type": "string or null",
+      "bonus_notes": "string or null",
+      "has_equity": boolean default false,
+      "equity_type": "string or null",
+      "equity_details": "string or null",
+      
+      "pto_days": integer or null,
+      "health_insurance_provided": boolean or null,
+      "retirement_matching": boolean or null,
+      "retirement_matching_details": "string or null",
+      "benefits_summary": "string or null",
+      "sign_on_bonus": number or null,
+      "relocation_assistance": boolean default false,
+      "relocation_amount": number or null,
+      
+      "contract_duration_text": "string e.g. 6 months",
+      "contract_start_date": "YYYY-MM-DD or null",
+      "contract_end_date": "YYYY-MM-DD or null",
+      "contract_can_extend": boolean or null,
+      
+      "allowed_work_auth": ["USC|GC|H1B|H4-EAD|L1|L2-EAD|TN|E3|F1-OPT|F1-CPT|STEM-OPT|J1|O1|EAD|Asylum-EAD|GC-EAD|Any|unsp"],
+      "not_allowed_work_auth": ["same values as allowed"],
+      "citizenship_required": "string or null",
+      "work_auth_notes": "string or null",
+      
+      "background_check_required": boolean default false,
+      "background_check_details": "string or null",
+      "security_clearance_required": boolean default false,
+      "security_clearance_level": "string or null",
+      
+      "overall_min_years": number or null,
+      "primary_role_min_years": number or null,
+      "management_experience_required": boolean default false,
+      
+      "must_have_skills": ["required skills array"],
+      "nice_to_have_skills": ["preferred skills array"],
+      "primary_technologies": ["main tech stack"],
+      "certifications_required": ["required certs"],
+      "certifications_preferred": ["preferred certs"],
+      "domains": ["industry domains"],
+      
+      "responsibilities": ["job responsibilities"],
+      "day_to_day": ["daily activities"],
+      "other_constraints": ["other requirements"],
+      
+      "work_hours": "string e.g. 9am-5pm EST",
+      "time_zone": "string e.g. EST",
+      "travel_required": boolean default false,
+      "travel_details": "string or null",
+      
+      "interview_process": "string describing interview rounds",
+      "submission_cutoff_date": "ISO datetime or null",
+      
+      "end_client_name": "string or null",
+      "client_name": "string or null",
+      "industry": "string or null",
+      "vendor_name": "string or null",
+      "vendor_contact_name": "string or null",
+      "vendor_contact_email": "string or null",
+      "vendor_contact_phone": "string or null"
+    }
+  ],
+  "parse_warnings": ["array of any parsing issues"]
 }
 
-RATE_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+RULES:
+1. job_title is REQUIRED - infer from context if not stated, use "Unknown role" as last resort
+2. For pay rates: if single value like "$60/hr", set BOTH pay_rate_min and pay_rate_max to 60
+3. For salary: if "100k to 130k", set salary_min=100000, salary_max=130000
+4. Arrays must be arrays even if empty: []
+5. Enums must match EXACTLY (case-sensitive)
+6. Do NOT invent data - use null for unknown fields
+7. If multiple roles discussed, create separate role objects
+8. location_cities and location_states arrays MUST have same length
+'''
 
-
-ENUMS = {
-    "seniority_level": [
-        "Entry",
-        "Mid",
-        "Senior",
-        "Lead",
-        "Architect",
-        "Manager",
-        "Director",
-        "VP",
-        "C-level",
-        "unspecified",
-    ],
-    "job_type": [
-        "Contract",
-        "Contract-to-hire",
-        "Full-time",
-        "Part-time",
-        "Internship",
-        "Other",
-        "unspecified",
-    ],
-    "submission_urgency": ["normal", "urgent", "flexible"],
-    "work_model": ["onsite", "remote", "hybrid", "flexible", "unspecified"],
-    "pay_rate_unit": ["hour", "day", "week", "month", "year", "unspecified"],
-    "employment_type": ["C2C", "W2", "1099", "unspecified"],
-    "work_authorization": [
-        "USC",
-        "GC",
-        "H1B",
-        "H4-EAD",
-        "L1",
-        "L2-EAD",
-        "TN",
-        "E3",
-        "F1-OPT",
-        "F1-CPT",
-        "STEM-OPT",
-        "J1",
-        "O1",
-        "EAD",
-        "Asylum-EAD",
-        "GC-EAD",
-        "Any",
-        "unsp",
-    ],
-}
-
-
-SYSTEM_PROMPT = f"""
-You extract structured job requirements from a transcript.
-
-Return ONLY valid JSON. No markdown. No commentary.
-Always return a JSON object with:
-- multi_role: boolean
-- roles: array of role objects (at least one)
-- parse_warnings: array (can be empty)
-
-If job_title is missing, infer it from the transcript. If still unknown, use "Unknown role".
-job_title max length is 200 chars; if longer, return the first 200 chars.
-
-If pay rate is stated as a single value (e.g., "$60/hr"), set BOTH pay_rate_min and
-pay_rate_max to that value. If a range is stated (e.g., "$50-$60/hr"), set pay_rate_min
-to the lower value and pay_rate_max to the higher value. Always set pay_rate_currency
-and pay_rate_unit when pay rate is mentioned.
-
-Always populate these arrays (use [] if none):
-- must_have_skills
-- nice_to_have_skills
-- primary_technologies
-- responsibilities
-- day_to_day
-- other_constraints
-- certifications_required
-- certifications_preferred
-- domains
-
-If the transcript mentions a minimum years-of-experience requirement, populate
-overall_min_years (and primary_role_min_years if it is role-specific).
-
-For any other string field that would exceed its column limit, return null.
-Do not truncate other fields.
-
-Enum values MUST match exactly:
-- seniority_level: {", ".join(ENUMS["seniority_level"])}
-- job_type: {", ".join(ENUMS["job_type"])}
-- submission_urgency: {", ".join(ENUMS["submission_urgency"])}
-- work_model: {", ".join(ENUMS["work_model"])}
-- pay_rate_unit: {", ".join(ENUMS["pay_rate_unit"])}
-- employment_type: {", ".join(ENUMS["employment_type"])}
-- work_authorization enum values: {", ".join(ENUMS["work_authorization"])}
-
-Defaults when unknown:
-- seniority_level: "unspecified"
-- job_type: "unspecified"
-- submission_urgency: "normal"
-- work_model: "unspecified"
-- pay_rate_unit: "unspecified"
-- employment_type: "unspecified"
-- status: "active"
-- allowed_work_auth: ["Any"]
-- not_allowed_work_auth: ["Any"]
-
-Column length limits (do not exceed; use null instead):
-{json.dumps(STRING_LIMITS, indent=2)}
-
-Important:
-- Do NOT invent data.
-- Arrays must be JSON arrays (even if empty).
-- Use null for missing optional fields.
-- parse_warnings must be present (use [] when none).
-""".strip()
-
-FILLER_RE = re.compile(
-    r"(?i)\b(?:um+|uh+|ah+|er+|hmm+|okay|alright|yeah|yep|so|like)\b(?=\s*(?:[.,!?]|$))"
-)
+FILLER_RE = re.compile(r"(?i)\b(?:um+|uh+|ah+|er+|hmm+|okay|alright|yeah|yep|so|like)\b(?=\s*[.,!?]|\s*$)")
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-PHONE_RE = re.compile(
-    r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b"
-)
+PHONE_RE = re.compile(r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b")
 
-
-def _remove_fillers(text: str) -> str:
-    cleaned = FILLER_RE.sub("", text)
-    return " ".join(cleaned.split())
-
-
-def _redact_pii(text: str) -> str:
-    redacted = EMAIL_RE.sub("[redacted]", text)
-    redacted = PHONE_RE.sub("[redacted]", redacted)
-    return redacted
-
-
-def _clean_transcript(messages: Any) -> str:
-    if not isinstance(messages, list):
-        return ""
-    lines: List[str] = []
+def _clean_transcript(messages: List[Dict]) -> str:
+    lines = []
     for msg in messages:
-        if not isinstance(msg, dict):
+        text = msg.get("message") or msg.get("content") or msg.get("text", "")
+        if not text or not isinstance(text, str):
             continue
-        text = msg.get("message")
-        if text is None:
-            text = msg.get("content")
-        if text is None:
-            text = msg.get("text")
-        if not isinstance(text, str):
+        text = " ".join(text.split())
+        text = FILLER_RE.sub("", text).strip()
+        if not text:
             continue
-        cleaned = " ".join(text.split())
-        cleaned = _remove_fillers(cleaned)
-        if not cleaned:
-            continue
-        if (cleaned.startswith("{") and cleaned.endswith("}")) or (
-            cleaned.startswith("[") and cleaned.endswith("]")
-        ):
-            continue
-        sender = msg.get("sender")
-        if sender is None:
-            sender = msg.get("role")
-        if isinstance(sender, str) and sender.lower() == "ai":
+        sender = msg.get("sender") or msg.get("role", "")
+        if sender.lower() == "ai":
             sender = "agent"
-        if isinstance(sender, str) and sender.strip():
-            lines.append(f"{sender.strip()}: {cleaned}")
-        else:
-            lines.append(cleaned)
+        lines.append(f"{sender}: {text}" if sender else text)
     return "\n".join(lines)
 
+def _redact_pii(text: str) -> str:
+    text = EMAIL_RE.sub("[EMAIL]", text)
+    return PHONE_RE.sub("[PHONE]", text)
 
-def _coerce_enum_value(value: Any, allowed: List[str], default: str) -> Optional[str]:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        return default
-    if value not in allowed:
-        return default
-    return value
-
-
-def _normalize_role_enums(role: Dict[str, Any], *, role_index: int) -> List[str]:
-    warnings: List[str] = []
-
-    for field, allowed, default in (
-        ("seniority_level", ENUMS["seniority_level"], "unspecified"),
-        ("job_type", ENUMS["job_type"], "unspecified"),
-        ("submission_urgency", ENUMS["submission_urgency"], "normal"),
-        ("work_model", ENUMS["work_model"], "unspecified"),
-        ("pay_rate_unit", ENUMS["pay_rate_unit"], "unspecified"),
-        ("employment_type", ENUMS["employment_type"], "unspecified"),
-    ):
-        raw_value = role.get(field)
-        coerced = _coerce_enum_value(raw_value, allowed, default)
-        if raw_value is not None and coerced != raw_value:
-            warnings.append(f"role[{role_index}] {field} invalid; set to {coerced}")
-            role[field] = coerced
-
-    for field in ("allowed_work_auth", "not_allowed_work_auth"):
-        raw_values = role.get(field)
-        if raw_values is None:
-            continue
-        if isinstance(raw_values, str):
-            raw_values = [raw_values]
-        if not isinstance(raw_values, list):
-            warnings.append(f"role[{role_index}] {field} invalid; set to Any")
-            role[field] = ["Any"]
-            continue
-        cleaned = [val for val in raw_values if isinstance(val, str) and val in ENUMS["work_authorization"]]
-        if not cleaned:
-            warnings.append(f"role[{role_index}] {field} invalid; set to Any")
-            role[field] = ["Any"]
-        else:
-            if len(cleaned) != len(raw_values):
-                warnings.append(f"role[{role_index}] {field} invalid entries removed")
-            role[field] = cleaned
-
-    return warnings
-
-
-def _normalize_pay_rates(role: Dict[str, Any], *, role_index: int) -> List[str]:
-    warnings: List[str] = []
-    pay_min = role.get("pay_rate_min")
-    pay_max = role.get("pay_rate_max")
-    pay_currency = role.get("pay_rate_currency")
-    pay_unit = role.get("pay_rate_unit")
-
-    rate_hint = role.get("pay_rate")
-    if rate_hint is None:
-        rate_hint = role.get("pay_rate_range")
-    if rate_hint is None:
-        rate_hint = role.get("pay_rate_text")
-
-    parsed = _parse_pay_rate_hint(rate_hint)
-    if parsed:
-        parsed_min, parsed_max, parsed_currency, parsed_unit = parsed
-        if pay_min is None and parsed_min is not None:
-            role["pay_rate_min"] = parsed_min
-            pay_min = parsed_min
-        if pay_max is None and parsed_max is not None:
-            role["pay_rate_max"] = parsed_max
-            pay_max = parsed_max
-        if parsed_currency and not pay_currency:
-            role["pay_rate_currency"] = parsed_currency
-            pay_currency = parsed_currency
-        if parsed_unit and (pay_unit is None or pay_unit == "unspecified"):
-            role["pay_rate_unit"] = parsed_unit
-            pay_unit = parsed_unit
-
-    if pay_min is None and pay_max is not None:
-        role["pay_rate_min"] = pay_max
-        warnings.append(f"role[{role_index}] pay_rate_min missing; set to pay_rate_max")
-    elif pay_max is None and pay_min is not None:
-        role["pay_rate_max"] = pay_min
-        warnings.append(f"role[{role_index}] pay_rate_max missing; set to pay_rate_min")
-    return warnings
-
-
-def _parse_pay_rate_hint(value: Any) -> Optional[Tuple[Optional[float], Optional[float], Optional[str], Optional[str]]]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value), float(value), None, None
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    if not text:
-        return None
-    numbers = [float(x) for x in RATE_NUMBER_RE.findall(text)]
-    if not numbers:
-        return None
-    if len(numbers) >= 2:
-        low = min(numbers[0], numbers[1])
-        high = max(numbers[0], numbers[1])
-    else:
-        low = high = numbers[0]
-
-    lowered = text.lower()
-    currency = None
-    if "$" in text or "usd" in lowered:
-        currency = "USD"
-    elif "eur" in lowered:
-        currency = "EUR"
-    elif "gbp" in lowered or "pound" in lowered:
-        currency = "GBP"
-
-    unit = None
-    if re.search(r"/\s*hr|\bhr\b|hourly|per\s*hour", lowered):
-        unit = "hour"
-    elif "day" in lowered:
-        unit = "day"
-    elif "week" in lowered:
-        unit = "week"
-    elif "month" in lowered:
-        unit = "month"
-    elif "year" in lowered or "annual" in lowered:
-        unit = "year"
-
-    return low, high, currency, unit
-
-
-def _parse_json(text: str) -> Optional[Any]:
+def _parse_json(text: str) -> Optional[Dict]:
     try:
         return json.loads(text)
-    except Exception:
+    except:
         pass
-
-    # Best-effort fallback: extract outermost JSON block.
-    start = min((i for i in (text.find("{"), text.find("[")) if i != -1), default=-1)
-    if start == -1:
-        return None
-    end = max(text.rfind("}"), text.rfind("]"))
-    if end == -1 or end <= start:
-        return None
-    snippet = text[start : end + 1]
-    try:
-        return json.loads(snippet)
-    except Exception:
-        return None
-
-
-def _apply_length_rules(role: Dict[str, Any], *, role_index: int) -> List[str]:
-    warnings: List[str] = []
-
-    raw_title = role.get("job_title")
-    title = str(raw_title).strip() if raw_title is not None else ""
-    if not title:
-        role["job_title"] = "Unknown role"
-        warnings.append(f"role[{role_index}] job_title missing; set to Unknown role")
-    elif len(title) > STRING_LIMITS["job_title"]:
-        role["job_title"] = title[: STRING_LIMITS["job_title"]]
-        warnings.append(f"role[{role_index}] job_title truncated to 200 chars")
-    else:
-        role["job_title"] = title
-
-    for field, limit in STRING_LIMITS.items():
-        if field == "job_title":
+    # Try to extract JSON from text
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
+        start = text.find(start_char)
+        if start == -1:
             continue
-        value = role.get(field)
-        if not isinstance(value, str):
-            continue
-        if len(value) > limit:
-            role[field] = None
-            warnings.append(f"role[{role_index}] {field} exceeded {limit}; set to null")
-        else:
-            role[field] = value.strip()
+        end = text.rfind(end_char)
+        if end > start:
+            try:
+                return json.loads(text[start:end+1])
+            except:
+                continue
+    return None
 
-    return warnings
+async def _log_proc(call_id: str, stage: str, level: str = "info", **kw) -> None:
+    _log(level, stage, call_id=call_id, **kw)
+    await insert_processing_log(call_id, stage, level=level, **kw)
 
+def _validate_webhook(payload: Dict) -> tuple:
+    if not payload.get("call_id"):
+        return False, "missing_call_id"
+    if not payload.get("event_type"):
+        return False, "missing_event_type"
+    if payload.get("event_type") == "call_ended":
+        if not payload.get("messages"):
+            return False, "missing_messages"
+        if not isinstance(payload.get("messages"), list):
+            return False, "invalid_messages"
+        if not payload.get("call_data", {}).get("agentId"):
+            return False, "missing_agent_id"
+    return True, "ok"
 
-def _build_notes(call_id: str, warnings: List[str]) -> str:
-    notes = [f"bey_call_id:{call_id}"]
-    if warnings:
-        notes.append("WARNINGS:")
-        notes.extend(warnings)
-    return "\n".join(notes)
+def _verify_admin(key: Optional[str]) -> bool:
+    if not ADMIN_API_KEY:
+        return True
+    return key == ADMIN_API_KEY
 
-
-async def _call_llm(cleaned_transcript: str) -> str:
-    client = _openai_client()
-    resp = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": cleaned_transcript},
-        ],
-    )
-    return resp.choices[0].message.content or ""
-
-
-async def _process_call(payload: Dict[str, Any]) -> None:
-    call_id = payload.get("call_id")
-    if not call_id:
-        return
-
-    messages = payload.get("messages") or []
+async def _process_call(call_id: str, payload: Dict) -> None:
+    """Background task to process a call."""
+    start = time.time()
+    await _log_proc(call_id, "webhook_received", message="Processing started")
+    await update_call_transcript(call_id, status="processing")
+    
+    messages = payload.get("messages", [])
     if not messages:
-        stored_messages = await fetch_call_messages(call_id)
-        if stored_messages:
-            messages = stored_messages
-            payload["messages"] = stored_messages
-            _log_event("info", "call_loaded_messages", call_id=call_id, message_count=len(stored_messages))
+        transcript = await fetch_call_transcript(call_id)
+        messages = transcript.get("messages", []) if transcript else []
+    
+    # Clean transcript
+    t0 = time.time()
     cleaned = _clean_transcript(messages)
     redacted = _redact_pii(cleaned)
-    _log_event("info", "call_processing_started", call_id=call_id, message_count=len(messages))
-
+    await _log_proc(call_id, "transcript_cleaned", message="Cleaned", 
+                    metadata={"chars": len(cleaned), "messages": len(messages)},
+                    duration_ms=int((time.time()-t0)*1000))
+    
+    if not cleaned.strip():
+        await _log_proc(call_id, "llm_failed", level="error", message="Empty transcript")
+        await update_call_transcript(call_id, status="failed", error_message="Empty transcript")
+        return
+    
+    # Call LLM
+    await _log_proc(call_id, "llm_started", message="Calling LLM", metadata={"model": OPENAI_MODEL})
+    t0 = time.time()
     try:
-        llm_text = await _call_llm(cleaned)
-    except Exception as exc:
-        _log_event("error", "llm_call_failed", call_id=call_id, error=str(exc))
-        await update_call_transcript(
-            call_id,
-            status="failed_parse",
-            error_message=f"LLM call failed: {exc}",
+        client = _openai_client()
+        resp = await client.chat.completions.create(
+            model=OPENAI_MODEL, temperature=0.1,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": cleaned}]
         )
+        llm_text = resp.choices[0].message.content or ""
+        llm_ms = int((time.time()-t0)*1000)
+    except Exception as e:
+        await _log_proc(call_id, "llm_failed", level="error", message=str(e), duration_ms=int((time.time()-t0)*1000))
+        await update_call_transcript(call_id, status="failed", error_message=f"LLM error: {e}")
+        await _log_proc(call_id, "processing_failed", level="error", duration_ms=int((time.time()-start)*1000))
         return
-
+    
+    # Parse LLM response
     parsed = _parse_json(llm_text)
-    if parsed is None:
-        _log_event("error", "llm_invalid_json", call_id=call_id)
-        await update_call_transcript(
-            call_id,
-            status="failed_parse",
-            error_message="LLM returned invalid JSON",
-        )
+    if not parsed or not isinstance(parsed.get("roles"), list) or not parsed["roles"]:
+        await _log_proc(call_id, "llm_failed", level="error", message="Invalid JSON", duration_ms=llm_ms)
+        await update_call_transcript(call_id, status="failed", error_message="LLM returned invalid JSON")
+        await _log_proc(call_id, "processing_failed", level="error", duration_ms=int((time.time()-start)*1000))
         return
-
-    if not isinstance(parsed, dict):
-        _log_event("error", "llm_invalid_wrapper", call_id=call_id)
-        await update_call_transcript(
-            call_id,
-            status="failed_parse",
-            error_message="LLM output JSON must be a wrapper object",
-        )
-        return
-
-    roles_raw = parsed.get("roles")
-    if not isinstance(roles_raw, list) or not roles_raw:
-        _log_event("error", "llm_missing_roles", call_id=call_id)
-        await update_call_transcript(
-            call_id,
-            status="failed_parse",
-            error_message="LLM output missing roles list",
-        )
-        return
-
-    parse_warnings = parsed.get("parse_warnings")
-    if not isinstance(parse_warnings, list):
-        parse_warnings = ["parse_warnings missing or invalid; initialized empty"]
-
-    roles: List[Dict[str, Any]] = []
-    for idx, role in enumerate(roles_raw):
+    
+    await _log_proc(call_id, "llm_complete", message="LLM done", 
+                    metadata={"roles": len(parsed["roles"])}, duration_ms=llm_ms)
+    
+    # Process roles
+    roles = parsed["roles"]
+    warnings = parsed.get("parse_warnings", [])
+    inserted = []
+    
+    for idx, role in enumerate(roles):
         if not isinstance(role, dict):
-            parse_warnings.append(f"role[{idx}] is not an object; skipped")
+            warnings.append(f"role[{idx}] not a dict, skipped")
             continue
-        role_copy = dict(role)
-        role_copy["job_id"] = f"{call_id}_{idx}"
-        parse_warnings.extend(_apply_length_rules(role_copy, role_index=idx))
-        parse_warnings.extend(_normalize_role_enums(role_copy, role_index=idx))
-        parse_warnings.extend(_normalize_pay_rates(role_copy, role_index=idx))
-        roles.append(role_copy)
-
-    if not roles:
-        _log_event("error", "llm_no_valid_roles", call_id=call_id)
-        await update_call_transcript(
-            call_id,
-            status="failed_parse",
-            error_message="LLM output contained no valid role objects",
-        )
-        return
-
-    multi_role = parsed.get("multi_role")
-    if not isinstance(multi_role, bool):
-        multi_role = len(roles) > 1
-
-    wrapper_roles = [dict(r) for r in roles]
+        
+        # Generate embedding
+        await _log_proc(call_id, "embedding_started", role_index=idx, message="Generating embedding")
+        t0 = time.time()
+        try:
+            jd_text = _build_jd_text(role)
+            embedding = await asyncio.to_thread(generate_embedding, jd_text)
+            await _log_proc(call_id, "embedding_complete", role_index=idx, duration_ms=int((time.time()-t0)*1000))
+        except Exception as e:
+            await _log_proc(call_id, "embedding_failed", level="error", role_index=idx, message=str(e))
+            embedding = None
+        
+        # Similarity search
+        similar_jobs, similarity_score = [], None
+        if embedding:
+            await _log_proc(call_id, "similarity_check_started", role_index=idx)
+            t0 = time.time()
+            try:
+                similar_jobs = await asyncio.to_thread(search_similar_jobs, embedding, SIMILARITY_THRESHOLD, MAX_SIMILAR_JOBS)
+                if similar_jobs:
+                    similarity_score = similar_jobs[0]["score"]
+                await _log_proc(call_id, "similarity_check_complete", role_index=idx,
+                               metadata={"matches": len(similar_jobs), "top_score": similarity_score},
+                               duration_ms=int((time.time()-t0)*1000))
+            except Exception as e:
+                await _log_proc(call_id, "similarity_check_failed", level="warning", role_index=idx, message=str(e))
+        
+        # Prepare role for insert
+        role["similar_jobs"] = similar_jobs
+        role["similarity_score"] = similarity_score
+        role["milvus_synced"] = False
+        
+        # Insert to Postgres
+        await _log_proc(call_id, "postgres_insert_started", role_index=idx)
+        t0 = time.time()
+        try:
+            result = await insert_job_requirement(role, call_id, idx)
+            if result:
+                db_id, job_id = result
+                await _log_proc(call_id, "postgres_insert_complete", role_index=idx, job_id=job_id,
+                               metadata={"title": role.get("job_title")}, duration_ms=int((time.time()-t0)*1000))
+                inserted.append({"idx": idx, "job_id": job_id, "embedding": embedding, "role": role})
+            else:
+                await _log_proc(call_id, "postgres_insert_skipped", role_index=idx, message="Duplicate")
+        except Exception as e:
+            await _log_proc(call_id, "postgres_insert_failed", level="error", role_index=idx, message=str(e))
+    
+    # Insert to Milvus
+    for item in inserted:
+        await _log_proc(call_id, "milvus_insert_started", role_index=item["idx"], job_id=item["job_id"])
+        t0 = time.time()
+        try:
+            item["role"]["job_id"] = item["job_id"]
+            success = await asyncio.to_thread(insert_job_posting, item["role"], item["embedding"])
+            if success:
+                await update_job_milvus_status(item["job_id"], True)
+                await _log_proc(call_id, "milvus_insert_complete", role_index=item["idx"], job_id=item["job_id"],
+                               duration_ms=int((time.time()-t0)*1000))
+            else:
+                await _log_proc(call_id, "milvus_insert_skipped", role_index=item["idx"], job_id=item["job_id"])
+        except Exception as e:
+            await _log_proc(call_id, "milvus_insert_failed", level="error", role_index=item["idx"], 
+                           job_id=item["job_id"], message=str(e))
+    
+    # Update call transcript
     wrapper = {
-        "multi_role": multi_role,
-        "roles": wrapper_roles,
-        "parse_warnings": parse_warnings,
+        "multi_role": parsed.get("multi_role", len(roles) > 1),
+        "roles": [i["role"] for i in inserted],
+        "parse_warnings": warnings,
         "cleaned_transcript": redacted,
         "source_call_id": call_id,
-        "extraction_version": "v1.5",
+        "extraction_version": "v2.0",
+        "jobs_created": [i["job_id"] for i in inserted],
     }
+    await update_call_transcript(call_id, status="parsed", parsed_requirements=wrapper)
+    await _log_proc(call_id, "processing_complete", message="Done",
+                   metadata={"roles_found": len(roles), "jobs_created": len(inserted)},
+                   duration_ms=int((time.time()-start)*1000))
 
-    role_payloads: List[Dict[str, Any]] = []
-    for idx, role in enumerate(roles):
-        role_payload = dict(role)
-        role_payload["raw_json_input"] = {
-            **wrapper,
-            "role_index": idx,
-            "role_count": len(wrapper_roles),
-        }
-        role_payloads.append(role_payload)
 
-    notes = _build_notes(call_id, parse_warnings)
-    metadata = {
-        "notes": notes,
-        "phone_call_duration": None,
-        "source_call_id": call_id,
-    }
-
-    evaluation = payload.get("evaluation") or {}
-    if isinstance(evaluation, dict):
-        duration_minutes = evaluation.get("duration_minutes")
-        if isinstance(duration_minutes, (int, float)):
-            metadata["phone_call_duration"] = int(duration_minutes * 60)
-
-    try:
-        await insert_job_requirements(
-            role_payloads,
-            metadata=metadata,
-            created_by="ava_ai_recruiter",
-            source_type="beyond_presence",
-            dedupe_call_id=call_id,
-        )
-    except Exception as exc:
-        _log_event("error", "job_insert_failed", call_id=call_id, error=str(exc))
-        await update_call_transcript(
-            call_id,
-            status="failed_parse",
-            error_message=f"DB insert failed: {exc}",
-        )
-        return
-
-    milvus_error = None
-    try:
-        inserted = insert_job_postings(role_payloads)
-        _log_event("info", "milvus_job_postings_inserted", call_id=call_id, count=inserted)
-    except Exception as exc:
-        milvus_error = f"Milvus insert failed: {exc}"
-        _log_event("error", "milvus_insert_failed", call_id=call_id, error=str(exc))
-
-    await update_call_transcript(
-        call_id,
-        parsed_requirements=wrapper,
-        status="parsed",
-        error_message=milvus_error,
-    )
-    _log_event(
-        "info",
-        "call_processing_complete",
-        call_id=call_id,
-        role_count=len(role_payloads),
-        warning_count=len(parse_warnings),
-    )
-
+# ============================================================
+# WEBHOOK ENDPOINTS
+# ============================================================
 
 @app.post("/webhook")
 async def webhook(request: Request):
     payload = await request.json()
+    
+    valid, reason = _validate_webhook(payload)
+    if not valid:
+        _log("warning", "webhook_invalid", reason=reason)
+        return JSONResponse({"status": "invalid", "reason": reason}, status_code=400, headers=CORS)
+    
     event_type = payload.get("event_type")
-
+    call_id = payload.get("call_id")
+    
     if event_type == "test":
-        _log_event("info", "webhook_test", event_type=event_type)
-        return JSONResponse({"status": "ok"}, headers=CORS_HEADERS)
-
-    if event_type == "message":
-        call_id = payload.get("call_id")
-        if not call_id:
-            _log_event("warning", "webhook_missing_call_id")
-            return JSONResponse({"status": "missing_call_id"}, headers=CORS_HEADERS)
-
-        message = payload.get("message")
-        if not isinstance(message, dict):
-            _log_event("warning", "webhook_missing_message", call_id=call_id)
-            return JSONResponse({"status": "missing_message"}, headers=CORS_HEADERS)
-
-        call_data = payload.get("call_data") if isinstance(payload.get("call_data"), dict) else {}
-        agent_id = payload.get("agent_id") or call_data.get("agentId")
-        session_id = payload.get("session_id")
-        user_name = payload.get("user_name") or call_data.get("userName")
-        tags = payload.get("tags") if isinstance(payload.get("tags"), dict) else None
-
-        try:
-            await append_call_message(
-                call_id,
-                message=message,
-                agent_id=agent_id,
-                session_id=session_id,
-                user_name=user_name,
-                event_type=event_type,
-                tags=tags,
-                raw_payload=payload,
-            )
-        except Exception as exc:
-            _log_event("error", "call_message_append_failed", call_id=call_id, error=str(exc))
-            return JSONResponse({"status": "db_error", "error": str(exc)}, headers=CORS_HEADERS)
-
-        _log_event("info", "webhook_message_received", call_id=call_id)
-        return JSONResponse({"status": "received"}, headers=CORS_HEADERS)
-
+        return JSONResponse({"status": "ok"}, headers=CORS)
+    
     if event_type != "call_ended":
-        _log_event("info", "webhook_ignored", event_type=event_type)
-        return JSONResponse({"status": "ignored"}, headers=CORS_HEADERS)
-
-    call_id = payload.get("call_id")
-    if not call_id:
-        _log_event("warning", "webhook_missing_call_id")
-        return JSONResponse({"status": "missing_call_id"}, headers=CORS_HEADERS)
-
-    agent_id = payload.get("agent_id")
-    tags = payload.get("tags") if isinstance(payload.get("tags"), dict) else None
-    if not agent_id and isinstance(tags, dict):
-        agent_id = tags.get("agent_id")
-    if not agent_id:
-        agent_id = "unknown"
-
-    record = {
-        "call_id": call_id,
-        "agent_id": agent_id,
-        "session_id": payload.get("session_id") or (tags.get("session_id") if isinstance(tags, dict) else None),
-        "user_name": payload.get("user_name"),
-        "event_type": event_type,
-        "call_started_at": payload.get("call_started_at") or payload.get("started_at"),
-        "call_ended_at": payload.get("call_ended_at") or payload.get("ended_at"),
-        "evaluation": payload.get("evaluation"),
-        "messages": payload.get("messages"),
-        "raw_payload": payload,
-        "tags": tags,
-        "status": "received",
-        "received_at": datetime.now(tz=timezone.utc),
-    }
-
+        return JSONResponse({"status": "ignored", "event_type": event_type}, headers=CORS)
+    
+    # Store and process
     try:
-        await insert_call_transcript(record)
-    except Exception as exc:
-        _log_event("error", "call_transcript_insert_failed", call_id=call_id, error=str(exc))
-        return JSONResponse({"status": "db_error", "error": str(exc)}, headers=CORS_HEADERS)
-
-    _log_event("info", "webhook_received", call_id=call_id, event_type=event_type)
-    asyncio.create_task(_process_call(payload))
-    return JSONResponse({"status": "accepted"}, headers=CORS_HEADERS)
-
-
-@app.post("/webhook/finalize")
-async def webhook_finalize(request: Request):
-    payload = await request.json()
-    call_id = payload.get("call_id")
-    if not call_id:
-        _log_event("warning", "webhook_missing_call_id")
-        return JSONResponse({"status": "missing_call_id"}, headers=CORS_HEADERS)
-
-    _log_event("info", "webhook_finalize_received", call_id=call_id)
-    asyncio.create_task(_process_call({"call_id": call_id}))
-    return JSONResponse({"status": "accepted"}, headers=CORS_HEADERS)
-
-
-@app.get("/webhook")
-async def webhook_get() -> JSONResponse:
-    return JSONResponse(
-        {
-            "status": "ok",
-            "message": "Webhook endpoint is ready. Send POST events to /webhook.",
-        },
-        headers=CORS_HEADERS,
-    )
+        await insert_call_transcript(payload)
+    except Exception as e:
+        _log("error", "webhook_db_error", call_id=call_id, error=str(e))
+        return JSONResponse({"status": "db_error", "error": str(e)}, status_code=500, headers=CORS)
+    
+    asyncio.create_task(_process_call(call_id, payload))
+    return JSONResponse({"status": "accepted", "call_id": call_id}, headers=CORS)
 
 
 @app.options("/webhook")
-async def webhook_options() -> Response:
-    return Response(status_code=204, headers=CORS_HEADERS)
+async def webhook_options():
+    return JSONResponse({}, headers=CORS)
 
+
+# ============================================================
+# HEALTH ENDPOINTS
+# ============================================================
 
 @app.get("/health")
-async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok"})
-
+async def health():
+    return JSONResponse({"status": "ok", "timestamp": datetime.now(tz=timezone.utc).isoformat()})
 
 @app.get("/health/db")
-async def health_db() -> JSONResponse:
-    ok, detail = await check_db_connection()
-    status = "ok" if ok else "error"
-    status_code = 200 if ok else 503
-    return JSONResponse({"status": status, "detail": detail}, status_code=status_code)
-
+async def health_db():
+    ok, msg = await check_db_connection()
+    return JSONResponse({"status": "ok" if ok else "error", "detail": msg}, status_code=200 if ok else 503)
 
 @app.get("/health/milvus")
-async def health_milvus() -> JSONResponse:
-    ok, detail = await asyncio.to_thread(check_milvus_connection)
-    status = "ok" if ok else "error"
-    status_code = 200 if ok else 503
-    return JSONResponse({"status": status, "detail": detail}, status_code=status_code)
+async def health_milvus():
+    ok, msg = await asyncio.to_thread(check_milvus_connection)
+    return JSONResponse({"status": "ok" if ok else "error", "detail": msg}, status_code=200 if ok else 503)
+
+
+# ============================================================
+# API ENDPOINTS
+# ============================================================
+
+@app.get("/api/stats")
+async def api_stats():
+    stats = await fetch_stats()
+    return JSONResponse(stats, headers=CORS)
+
+@app.get("/api/calls/{call_id}/status")
+async def api_call_status(call_id: str):
+    transcript = await fetch_call_transcript(call_id)
+    if not transcript:
+        raise HTTPException(404, "Call not found")
+    logs = await fetch_processing_logs(call_id)
+    return JSONResponse({
+        "call_id": call_id,
+        "status": transcript.get("status"),
+        "error_message": transcript.get("error_message"),
+        "message_count": transcript.get("message_count"),
+        "processing_logs": logs,
+        "parsed_requirements": transcript.get("parsed_requirements"),
+    }, headers=CORS)
+
+@app.get("/api/calls/{call_id}/logs")
+async def api_call_logs(call_id: str):
+    logs = await fetch_processing_logs(call_id)
+    return JSONResponse({"call_id": call_id, "logs": logs}, headers=CORS)
+
+@app.post("/api/calls/{call_id}/reprocess")
+async def api_reprocess(call_id: str, x_admin_key: Optional[str] = Header(None)):
+    if not _verify_admin(x_admin_key):
+        raise HTTPException(401, "Invalid admin key")
+    
+    transcript = await fetch_call_transcript(call_id)
+    if not transcript:
+        raise HTTPException(404, "Call not found")
+    if transcript.get("status") != "failed":
+        raise HTTPException(400, f"Call status is '{transcript.get('status')}', not 'failed'")
+    
+    payload = transcript.get("raw_payload", {})
+    payload["call_id"] = call_id
+    asyncio.create_task(_process_call(call_id, payload))
+    return JSONResponse({"status": "reprocessing", "call_id": call_id}, headers=CORS)
+
+@app.post("/api/calls/ingest")
+async def api_ingest(request: Request, x_admin_key: Optional[str] = Header(None)):
+    if not _verify_admin(x_admin_key):
+        raise HTTPException(401, "Invalid admin key")
+    
+    body = await request.json()
+    call_id = body.get("call_id")
+    if not call_id:
+        raise HTTPException(400, "call_id required")
+    
+    # Check if already exists
+    existing = await fetch_call_transcript(call_id)
+    if existing:
+        raise HTTPException(409, f"Call {call_id} already exists")
+    
+    # Fetch from Beyond Presence API
+    payload = await asyncio.to_thread(build_webhook_payload, call_id)
+    if not payload:
+        raise HTTPException(404, f"Call {call_id} not found in Beyond Presence")
+    
+    try:
+        await insert_call_transcript(payload)
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+    
+    asyncio.create_task(_process_call(call_id, payload))
+    return JSONResponse({"status": "ingesting", "call_id": call_id}, headers=CORS)
+
+@app.post("/api/milvus/sync")
+async def api_milvus_sync(x_admin_key: Optional[str] = Header(None)):
+    if not _verify_admin(x_admin_key):
+        raise HTTPException(401, "Invalid admin key")
+    
+    jobs = await fetch_unsynced_jobs(100)
+    if not jobs:
+        return JSONResponse({"status": "ok", "synced": 0, "failed": 0}, headers=CORS)
+    
+    success, fail = await asyncio.to_thread(sync_jobs_to_milvus, jobs)
+    
+    # Update synced status
+    for job in jobs[:success]:
+        await update_job_milvus_status(job["job_id"], True)
+    
+    return JSONResponse({"status": "ok", "synced": success, "failed": fail, "total": len(jobs)}, headers=CORS)
+
+@app.get("/api/failed")
+async def api_failed():
+    calls = await fetch_failed_calls()
+    return JSONResponse({"failed_calls": calls}, headers=CORS)
