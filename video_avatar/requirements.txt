@@ -1,5 +1,5 @@
 python-dotenv ~= 1.0
-requests ~= 2.0
+requests~=2.31
 psycopg[binary] ~= 3.2
 fastapi ~= 0.111
 uvicorn[standard] ~= 0.30
@@ -8,5 +8,6 @@ pillow ~= 10.4
 python-multipart ~= 0.0.9
 openai ~= 1.40
 pymilvus == 2.6.3
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.0+cpu
 sentence-transformers == 3.3.1
