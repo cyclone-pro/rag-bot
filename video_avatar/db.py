@@ -5,9 +5,8 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 from urllib.parse import urlparse
-
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.sql import SQL, Identifier
@@ -48,7 +47,6 @@ RATE_UNIT_ENUM = {"hour", "day", "week", "month", "year", "unspecified"}
 
 EMPLOYMENT_TYPE_ENUM = {"C2C", "W2", "1099", "unspecified"}
 
-# Your work_authorization_enum list includes 'unsp' (not 'unspecified').
 WORK_AUTH_ENUM = {
     "USC",
     "GC",
@@ -70,6 +68,32 @@ WORK_AUTH_ENUM = {
     "unsp",
 }
 
+LOG_LEVEL_ENUM = {"debug", "info", "warning", "error"}
+
+PROCESSING_STAGE_ENUM = {
+    "webhook_received",
+    "transcript_cleaned",
+    "llm_started",
+    "llm_complete",
+    "llm_failed",
+    "embedding_started",
+    "embedding_complete",
+    "embedding_failed",
+    "similarity_check_started",
+    "similarity_check_complete",
+    "similarity_check_failed",
+    "postgres_insert_started",
+    "postgres_insert_complete",
+    "postgres_insert_skipped",
+    "postgres_insert_failed",
+    "milvus_insert_started",
+    "milvus_insert_complete",
+    "milvus_insert_skipped",
+    "milvus_insert_failed",
+    "processing_complete",
+    "processing_failed",
+}
+
 
 # ---------------------------
 # Output-schema defaults (match your prompt)
@@ -87,9 +111,12 @@ DEFAULTS: Dict[str, Any] = {
     "positions_available": 1,
     "allowed_work_auth": ["Any"],
     "not_allowed_work_auth": ["Any"],
+    "source_role_index": 0,
 }
 
 CALL_TRANSCRIPTS_TABLE = "call_transcripts"
+PROCESSING_LOGS_TABLE = "processing_logs"
+
 CALL_TRANSCRIPT_JSON_COLUMNS = {
     "raw_payload",
     "messages",
@@ -158,7 +185,6 @@ def _db_url_from_env() -> str:
             "Set DATABASE_URL or PGHOST/PGDATABASE/PGUSER/PGPASSWORD (and optional PGPORT)"
         )
 
-    # NOTE: basic URL; if you have special chars in password, url-encode it.
     return f"postgresql://{user}:{pw}@{host}:{port}/{db}"
 
 
@@ -210,7 +236,6 @@ def _ensure_list(v: Any) -> List[Any]:
         return []
     if isinstance(v, list):
         return v
-    # occasionally model sends tuple
     if isinstance(v, tuple):
         return list(v)
     return [v]
@@ -220,7 +245,6 @@ def _coerce_enum(v: Any, allowed: set, default: str) -> str:
     s = _strip_or_none(v)
     if not s:
         return default
-    # exact match only (case-sensitive enums)
     return s if s in allowed else default
 
 
@@ -231,7 +255,6 @@ def _coerce_work_auth_list(v: Any) -> List[str]:
         s = _strip_or_none(it)
         if not s:
             continue
-        # model might send "unspecified"; DB uses "unsp"
         if s == "unspecified":
             s = "unsp"
         if s in WORK_AUTH_ENUM:
@@ -248,7 +271,6 @@ def _iso_date(v: Any) -> Optional[date]:
         s = v.strip()
         if not s:
             return None
-        # accept YYYY-MM-DD or full ISO; take date portion
         try:
             if "T" in s:
                 s = s.split("T", 1)[0]
@@ -279,7 +301,6 @@ def _iso_timestamptz(v: Any) -> Optional[datetime]:
 def _clean_locations(cities: Any, states: Any) -> Tuple[List[str], List[str]]:
     c = [x for x in (_strip_or_none(i) for i in _ensure_list(cities)) if x]
     s = [x for x in (_strip_or_none(i) for i in _ensure_list(states)) if x]
-    # enforce same length; if mismatch, drop both to avoid insert errors
     if len(c) != len(s):
         return ([], [])
     return (c, s)
@@ -292,9 +313,10 @@ class PreparedRow:
     values: List[Any]
 
 
-# Columns we accept from the model JSON (output schema) + a few meta fields
+# Columns we accept from the model JSON (output schema) + meta fields
 MODEL_COLUMNS = {
     "source_call_id",
+    "source_role_index",
     "job_id",
     "external_requisition_id",
     "job_title",
@@ -372,6 +394,9 @@ MODEL_COLUMNS = {
     "vendor_contact_phone",
     "raw_role_title_block",
     "status",
+    # Similarity tracking
+    "similar_jobs",
+    "similarity_score",
 }
 
 
@@ -392,7 +417,7 @@ def _prepare_role(role: Mapping[str, Any], metadata: Optional[Mapping[str, Any]]
     """Normalize + validate a single role object against DB constraints."""
     data: Dict[str, Any] = {}
 
-    # Start with defaults for enum-ish fields and required defaults.
+    # Start with defaults
     for k, v in DEFAULTS.items():
         data[k] = v
 
@@ -414,11 +439,10 @@ def _prepare_role(role: Mapping[str, Any], metadata: Optional[Mapping[str, Any]]
     data["location_cities"] = cities
     data["location_states"] = states
 
-    # Work auth lists (enum arrays)
+    # Work auth lists
     allowed = _coerce_work_auth_list(data.get("allowed_work_auth"))
     not_allowed = _coerce_work_auth_list(data.get("not_allowed_work_auth"))
 
-    # If vendor didn't specify anything, enforce both to ["Any"]
     if not allowed:
         allowed = ["Any"]
     if not not_allowed:
@@ -427,7 +451,7 @@ def _prepare_role(role: Mapping[str, Any], metadata: Optional[Mapping[str, Any]]
     data["allowed_work_auth"] = allowed
     data["not_allowed_work_auth"] = not_allowed
 
-    # Booleans that are nullable in DB
+    # Booleans that are nullable
     for bk in (
         "is_rate_strict",
         "health_insurance_provided",
@@ -447,8 +471,6 @@ def _prepare_role(role: Mapping[str, Any], metadata: Optional[Mapping[str, Any]]
     # Dates
     data["contract_start_date"] = _iso_date(data.get("contract_start_date"))
     data["contract_end_date"] = _iso_date(data.get("contract_end_date"))
-
-    # submission_cutoff_date is timestamptz
     data["submission_cutoff_date"] = _iso_timestamptz(data.get("submission_cutoff_date"))
 
     # Trim strings
@@ -506,9 +528,19 @@ def _prepare_role(role: Mapping[str, Any], metadata: Optional[Mapping[str, Any]]
             arr = [x for x in (_strip_or_none(i) for i in _ensure_list(data[ak])) if x]
             data[ak] = arr
 
-    # Numeric-ish values: leave as-is (psycopg will coerce strings for numeric); optionally strip.
+    # Ensure source_role_index is an integer
+    if "source_role_index" in data:
+        try:
+            data["source_role_index"] = int(data["source_role_index"])
+        except (TypeError, ValueError):
+            data["source_role_index"] = 0
 
-    # Merge metadata (DB columns) if present
+    # Ensure similar_jobs is a list
+    if "similar_jobs" in data and data["similar_jobs"] is not None:
+        if not isinstance(data["similar_jobs"], list):
+            data["similar_jobs"] = []
+
+    # Merge metadata if present
     if metadata:
         for k, v in metadata.items():
             data[k] = v
@@ -523,7 +555,6 @@ def _build_insert(row: Mapping[str, Any]) -> PreparedRow:
     vals: List[Any] = []
 
     for k, v in row.items():
-        # Pattern A: omit nulls so DEFAULT applies.
         if v is None:
             continue
 
@@ -532,7 +563,7 @@ def _build_insert(row: Mapping[str, Any]) -> PreparedRow:
         cast = CASTS.get(k, "")
         ph.append(f"%s{cast}")
 
-        if k == "raw_json_input":
+        if k in ("raw_json_input", "similar_jobs"):
             vals.append(Jsonb(v))
         else:
             vals.append(v)
@@ -540,17 +571,121 @@ def _build_insert(row: Mapping[str, Any]) -> PreparedRow:
     return PreparedRow(columns=cols, placeholders=ph, values=vals)
 
 
+# ---------------------------
+# Processing Logs Functions
+# ---------------------------
+
+async def insert_processing_log(
+    call_id: str,
+    stage: str,
+    *,
+    level: str = "info",
+    role_index: Optional[int] = None,
+    job_id: Optional[str] = None,
+    message: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    duration_ms: Optional[int] = None,
+) -> None:
+    """Insert a log entry into the processing_logs table."""
+    if stage not in PROCESSING_STAGE_ENUM:
+        _log_event("warning", "invalid_processing_stage", stage=stage, call_id=call_id)
+        return
+    
+    if level not in LOG_LEVEL_ENUM:
+        level = "info"
+
+    data: Dict[str, Any] = {
+        "call_id": call_id,
+        "stage": stage,
+        "level": level,
+        "role_index": role_index,
+        "job_id": job_id,
+        "message": message,
+        "metadata": metadata or {},
+        "duration_ms": duration_ms,
+        "created_at": datetime.now(tz=timezone.utc),
+    }
+
+    cols: List[str] = []
+    ph: List[str] = []
+    vals: List[Any] = []
+
+    for k, v in data.items():
+        if v is None:
+            continue
+        cols.append(k)
+        if k == "metadata":
+            ph.append("%s")
+            vals.append(Jsonb(v))
+        elif k == "stage":
+            ph.append("%s::processing_stage_enum")
+            vals.append(v)
+        elif k == "level":
+            ph.append("%s::log_level_enum")
+            vals.append(v)
+        else:
+            ph.append("%s")
+            vals.append(v)
+
+    if not cols:
+        return
+
+    query = SQL("INSERT INTO {table} ({cols}) VALUES ({vals})").format(
+        table=Identifier(PROCESSING_LOGS_TABLE),
+        cols=SQL(", ").join(Identifier(c) for c in cols),
+        vals=SQL(", ").join(SQL(p) for p in ph),
+    )
+
+    db_url = _db_url_from_env()
+    try:
+        async with await AsyncConnection.connect(db_url) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, vals)
+                await conn.commit()
+    except Exception as exc:
+        # Log to stdout but don't raise - logging shouldn't break processing
+        _log_event("error", "insert_processing_log_failed", call_id=call_id, stage=stage, error=str(exc))
+
+
+async def fetch_processing_logs(
+    call_id: str,
+    *,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Fetch processing logs for a call, ordered by created_at."""
+    query = SQL(
+        "SELECT id, call_id, role_index, job_id, level, stage, message, metadata, created_at, duration_ms "
+        "FROM {table} WHERE call_id = %s ORDER BY created_at ASC LIMIT %s"
+    ).format(table=Identifier(PROCESSING_LOGS_TABLE))
+
+    db_url = _db_url_from_env()
+    try:
+        async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (call_id, limit))
+                rows = await cur.fetchall()
+                return [dict(row) for row in rows]
+    except Exception as exc:
+        _log_event("error", "fetch_processing_logs_failed", call_id=call_id, error=str(exc))
+        return []
+
+
+# ---------------------------
+# Job Requirements Functions
+# ---------------------------
+
 async def insert_job_requirements(
     payload: Union[Dict[str, Any], List[Dict[str, Any]]],
     *,
     metadata: Optional[Mapping[str, Any]] = None,
     created_by: str = "ava_ai_recruiter",
     source_type: str = "phone_interview",
-    dedupe_call_id: Optional[str] = None,
 ) -> List[Tuple[str, str]]:
     """Insert 1..N role payloads into job_requirements.
 
-    Returns a list of (id, job_id) tuples for each processed role.
+    Uses ON CONFLICT (source_call_id, source_role_index) DO NOTHING for deduplication.
+    Returns a list of (id, job_id) tuples for each inserted role.
+    Skipped (duplicate) roles are not included in the results.
     """
 
     roles: List[Dict[str, Any]]
@@ -558,11 +693,6 @@ async def insert_job_requirements(
         roles = payload
     else:
         roles = [payload]
-
-    # best-effort idempotency: if dedupe_call_id exists, skip if already inserted
-    dedupe_key = None
-    if dedupe_call_id:
-        dedupe_key = f"bey_call_id:{dedupe_call_id}"
 
     db_url = _db_url_from_env()
     db_info = _db_info_from_url(db_url)
@@ -573,61 +703,58 @@ async def insert_job_requirements(
         async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
             async with conn.cursor() as cur:
                 for idx, role in enumerate(roles):
-                    # store raw payload JSON in raw_json_input always
                     meta = dict(metadata or {})
                     meta.setdefault("created_by", created_by)
                     meta.setdefault("source_type", source_type)
-                    if dedupe_call_id:
-                        meta.setdefault("source_call_id", dedupe_call_id)
+                    
+                    # Ensure source_role_index is set
+                    if "source_role_index" not in role:
+                        role["source_role_index"] = idx
+
                     if "raw_json_input" not in meta:
                         role_payload = role if isinstance(role, dict) else {}
                         meta["raw_json_input"] = role_payload.get("raw_json_input", role)
 
-                    # For multi-role calls with a single dedupe_call_id, keep unique-ish notes.
-                    # If you want true idempotency per-role, include stable role id in model output.
-                    if dedupe_key:
-                        role_note = dedupe_key if idx == 0 else f"{dedupe_key}#role{idx}"
-                        meta["notes"] = role_note
-                        await cur.execute(
-                            "SELECT id, job_id FROM job_requirements WHERE notes = %s ORDER BY created_at DESC LIMIT 1",
-                            (role_note,),
-                        )
-                        existing = await cur.fetchone()
-                        if existing:
-                            _log_event(
-                                "info",
-                                "db_insert_job_requirements_deduped",
-                                dedupe_key=role_note,
-                                job_id=existing["job_id"],
-                                role_index=idx,
-                                **db_info,
-                            )
-                            continue
-
                     prepared = _prepare_role(role, meta)
-
                     ins = _build_insert(prepared)
 
                     if not ins.columns:
-                        # Should never happen; but avoid invalid SQL.
                         continue
 
-                    query = SQL("INSERT INTO job_requirements ({cols}) VALUES ({vals}) RETURNING id, job_id").format(
+                    # Use ON CONFLICT for deduplication
+                    query = SQL(
+                        "INSERT INTO job_requirements ({cols}) VALUES ({vals}) "
+                        "ON CONFLICT (source_call_id, source_role_index) DO NOTHING "
+                        "RETURNING id, job_id"
+                    ).format(
                         cols=SQL(", ").join(Identifier(c) for c in ins.columns),
                         vals=SQL(", ").join(SQL(p) for p in ins.placeholders),
                     )
 
                     await cur.execute(query, ins.values)
                     row = await cur.fetchone()
-                    results.append((row["id"], row["job_id"]))
-                    _log_event(
-                        "info",
-                        "db_insert_job_requirements_row",
-                        job_id=prepared.get("job_id"),
-                        job_title=prepared.get("job_title"),
-                        role_index=idx,
-                        **db_info,
-                    )
+                    
+                    if row:
+                        # Row was inserted
+                        results.append((str(row["id"]), row["job_id"]))
+                        _log_event(
+                            "info",
+                            "db_insert_job_requirements_row",
+                            job_id=row["job_id"],
+                            job_title=prepared.get("job_title"),
+                            role_index=idx,
+                            **db_info,
+                        )
+                    else:
+                        # Row was skipped (duplicate)
+                        _log_event(
+                            "info",
+                            "db_insert_job_requirements_skipped",
+                            source_call_id=prepared.get("source_call_id"),
+                            source_role_index=prepared.get("source_role_index"),
+                            role_index=idx,
+                            **db_info,
+                        )
 
                 await conn.commit()
 
@@ -637,6 +764,26 @@ async def insert_job_requirements(
         _log_event("error", "db_insert_job_requirements_failed", error=str(exc), **db_info)
         raise
 
+
+async def fetch_job_by_id(job_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a job requirement by job_id."""
+    query = SQL("SELECT * FROM job_requirements WHERE job_id = %s")
+    
+    db_url = _db_url_from_env()
+    try:
+        async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (job_id,))
+                row = await cur.fetchone()
+                return dict(row) if row else None
+    except Exception as exc:
+        _log_event("error", "fetch_job_by_id_failed", job_id=job_id, error=str(exc))
+        return None
+
+
+# ---------------------------
+# Call Transcripts Functions
+# ---------------------------
 
 async def insert_call_transcript(
     payload: Mapping[str, Any],
@@ -790,6 +937,27 @@ async def fetch_call_messages(
     except Exception as exc:
         _log_event("error", "db_fetch_call_messages_failed", call_id=call_id, error=str(exc), **db_info)
         return []
+
+
+async def fetch_call_transcript(
+    call_id: str,
+    *,
+    table: str = CALL_TRANSCRIPTS_TABLE,
+) -> Optional[Dict[str, Any]]:
+    """Fetch full call transcript record."""
+    if not call_id:
+        return None
+    query = SQL("SELECT * FROM {table} WHERE call_id = %s").format(table=Identifier(table))
+    db_url = _db_url_from_env()
+    try:
+        async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (call_id,))
+                row = await cur.fetchone()
+                return dict(row) if row else None
+    except Exception as exc:
+        _log_event("error", "db_fetch_call_transcript_failed", call_id=call_id, error=str(exc))
+        return None
 
 
 async def update_call_transcript(

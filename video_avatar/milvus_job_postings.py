@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from pymilvus import Collection, DataType, connections, utility
@@ -20,6 +20,10 @@ MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION") or os.getenv("MILVUS_JOB_COLL
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/e5-base-v2")
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
+
+# Similarity threshold for detecting similar jobs
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.93"))
+MAX_SIMILAR_JOBS = int(os.getenv("MAX_SIMILAR_JOBS", "3"))
 
 FIELD_LIMITS = {
     "job_id": 64,
@@ -80,6 +84,7 @@ def _truncate_or_default(value: Optional[str], limit: int, default: str = "") ->
 def _get_embedder() -> SentenceTransformer:
     global _EMBEDDER
     if _EMBEDDER is None:
+        _log_event("info", "loading_embedding_model", model=EMBEDDING_MODEL, device=EMBEDDING_DEVICE)
         _EMBEDDER = SentenceTransformer(EMBEDDING_MODEL, device=EMBEDDING_DEVICE)
     return _EMBEDDER
 
@@ -109,6 +114,7 @@ def _get_collection() -> Collection:
         if not utility.has_collection(MILVUS_COLLECTION, using="job_postings"):
             raise RuntimeError(f"Milvus collection not found: {MILVUS_COLLECTION}")
         _COLLECTION = Collection(MILVUS_COLLECTION, using="job_postings")
+        _COLLECTION.load()
     return _COLLECTION
 
 
@@ -271,7 +277,189 @@ def _prepare_posting(role: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
     return posting, posting["jd_text"] or ""
 
 
-def insert_job_postings(roles: Iterable[Dict[str, Any]]) -> int:
+# ---------------------------
+# Public API: Embedding Generation
+# ---------------------------
+
+def generate_embedding(text: str) -> List[float]:
+    """Generate embedding for a single text using e5-base-v2.
+    
+    The text is prefixed with 'passage: ' as required by e5 models.
+    Returns a normalized embedding vector.
+    """
+    embedder = _get_embedder()
+    input_text = f"passage: {text}"
+    vector = embedder.encode(input_text, normalize_embeddings=True)
+    
+    if hasattr(vector, "tolist"):
+        return vector.tolist()
+    return list(vector)
+
+
+def generate_embeddings(texts: List[str]) -> List[List[float]]:
+    """Generate embeddings for multiple texts.
+    
+    Each text is prefixed with 'passage: ' as required by e5 models.
+    Returns a list of normalized embedding vectors.
+    """
+    if not texts:
+        return []
+    
+    embedder = _get_embedder()
+    inputs = [f"passage: {text}" for text in texts]
+    vectors = embedder.encode(inputs, normalize_embeddings=True)
+    
+    if hasattr(vectors, "tolist"):
+        return vectors.tolist()
+    return [list(v) for v in vectors]
+
+
+# ---------------------------
+# Public API: Similarity Search
+# ---------------------------
+
+def search_similar_jobs(
+    embedding: List[float],
+    *,
+    threshold: float = SIMILARITY_THRESHOLD,
+    top_k: int = MAX_SIMILAR_JOBS,
+) -> List[Dict[str, Any]]:
+    """Search Milvus for jobs similar to the given embedding.
+    
+    Args:
+        embedding: The embedding vector to search with
+        threshold: Minimum similarity score (0-1, default 0.93)
+        top_k: Maximum number of results to return (default 3)
+    
+    Returns:
+        List of dicts with keys: job_id, score
+        Sorted by score descending, only includes results above threshold.
+    """
+    if not MILVUS_URI and not MILVUS_HOST:
+        _log_event("warning", "milvus_not_configured_for_similarity_search")
+        return []
+
+    if len(embedding) != EMBEDDING_DIM:
+        _log_event("error", "embedding_dimension_mismatch", expected=EMBEDDING_DIM, got=len(embedding))
+        return []
+
+    try:
+        collection = _get_collection()
+        
+        # Search with top_k * 2 to have buffer for filtering
+        search_params = {
+            "metric_type": "IP",  # Inner product for normalized vectors = cosine similarity
+            "params": {"nprobe": 10},
+        }
+        
+        results = collection.search(
+            data=[embedding],
+            anns_field="jd_embedding",
+            param=search_params,
+            limit=top_k * 2,
+            output_fields=["job_id"],
+        )
+        
+        similar_jobs: List[Dict[str, Any]] = []
+        
+        if results and len(results) > 0:
+            for hit in results[0]:
+                score = float(hit.score)
+                if score >= threshold:
+                    similar_jobs.append({
+                        "job_id": hit.entity.get("job_id"),
+                        "score": round(score, 4),
+                    })
+        
+        # Sort by score descending and limit to top_k
+        similar_jobs.sort(key=lambda x: x["score"], reverse=True)
+        similar_jobs = similar_jobs[:top_k]
+        
+        _log_event(
+            "info",
+            "milvus_similarity_search_complete",
+            threshold=threshold,
+            results_found=len(similar_jobs),
+        )
+        
+        return similar_jobs
+        
+    except Exception as exc:
+        _log_event("error", "milvus_similarity_search_failed", error=str(exc))
+        return []
+
+
+# ---------------------------
+# Public API: Insert Job Postings
+# ---------------------------
+
+def insert_job_posting(
+    role: Dict[str, Any],
+    *,
+    embedding: Optional[List[float]] = None,
+) -> bool:
+    """Insert a single job posting to Milvus.
+    
+    Args:
+        role: The job role data (must include job_id)
+        embedding: Pre-computed embedding. If None, will be generated.
+    
+    Returns:
+        True if inserted successfully, False otherwise.
+    """
+    if not MILVUS_URI and not MILVUS_HOST:
+        raise RuntimeError("MILVUS_URI or MILVUS_HOST is not configured")
+
+    if not isinstance(role, dict):
+        return False
+
+    posting, jd_text = _prepare_posting(role)
+    
+    if not posting.get("job_id"):
+        _log_event("warning", "milvus_insert_skipped_no_job_id")
+        return False
+
+    # Use pre-computed embedding or generate new one
+    if embedding is None:
+        embedding = generate_embedding(jd_text)
+    
+    if len(embedding) != EMBEDDING_DIM:
+        _log_event("error", "embedding_dimension_mismatch", expected=EMBEDDING_DIM, got=len(embedding))
+        return False
+
+    posting["jd_embedding"] = embedding
+
+    try:
+        collection = _get_collection()
+        
+        if _company_is_array(collection):
+            company_value = posting.get("company") or "Unknown"
+            posting["company"] = [company_value]
+        
+        collection.insert([posting])
+        
+        _log_event("info", "milvus_insert_single_ok", job_id=posting.get("job_id"))
+        return True
+        
+    except Exception as exc:
+        _log_event("error", "milvus_insert_single_failed", job_id=posting.get("job_id"), error=str(exc))
+        return False
+
+
+def insert_job_postings(
+    roles: List[Dict[str, Any]],
+    *,
+    embeddings: Optional[List[List[float]]] = None,
+) -> int:
+    """Insert multiple job postings to Milvus.
+    
+    Args:
+        roles: List of job role data (each must include job_id)
+        embeddings: Pre-computed embeddings matching roles order. If None, will be generated.
+    
+    Returns:
+        Number of successfully inserted postings.
+    """
     if not MILVUS_URI and not MILVUS_HOST:
         raise RuntimeError("MILVUS_URI or MILVUS_HOST is not configured")
 
@@ -281,6 +469,7 @@ def insert_job_postings(roles: Iterable[Dict[str, Any]]) -> int:
 
     postings: List[Dict[str, Any]] = []
     texts: List[str] = []
+    
     for role in role_list:
         posting, jd_text = _prepare_posting(role)
         if not posting.get("job_id"):
@@ -303,29 +492,37 @@ def insert_job_postings(roles: Iterable[Dict[str, Any]]) -> int:
         sample_truncated=len(postings) > 10,
     )
 
-    embedder = _get_embedder()
-    inputs = [f"passage: {text}" for text in texts]
-    vectors = embedder.encode(inputs, normalize_embeddings=True)
-
-    if hasattr(vectors, "tolist"):
-        vectors_list = vectors.tolist()
+    # Use pre-computed embeddings or generate new ones
+    if embeddings is not None and len(embeddings) == len(postings):
+        vectors_list = embeddings
     else:
-        vectors_list = list(vectors)
+        vectors_list = generate_embeddings(texts)
 
     for posting, vector in zip(postings, vectors_list):
         if len(vector) != EMBEDDING_DIM:
             raise ValueError(f"Embedding dimension mismatch: {len(vector)} != {EMBEDDING_DIM}")
         posting["jd_embedding"] = vector
 
-    collection = _get_collection()
-    if _company_is_array(collection):
-        for posting in postings:
-            company_value = posting.get("company") or "Unknown"
-            posting["company"] = [company_value]
-    collection.insert(postings)
-    _log_event("info", "milvus_insert_ok", count=len(postings))
-    return len(postings)
+    try:
+        collection = _get_collection()
+        
+        if _company_is_array(collection):
+            for posting in postings:
+                company_value = posting.get("company") or "Unknown"
+                posting["company"] = [company_value]
+        
+        collection.insert(postings)
+        _log_event("info", "milvus_insert_ok", count=len(postings))
+        return len(postings)
+        
+    except Exception as exc:
+        _log_event("error", "milvus_insert_failed", error=str(exc))
+        raise
 
+
+# ---------------------------
+# Public API: Health Check
+# ---------------------------
 
 def check_milvus_connection(timeout: int = 5) -> Tuple[bool, str]:
     if not MILVUS_URI and not MILVUS_HOST:
