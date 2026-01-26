@@ -373,18 +373,28 @@ async def _process_call(call_id: str, payload: Dict) -> None:
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    payload = await request.json()
+    # Handle empty body or validation ping
+    try:
+        payload = await request.json()
+    except:
+        payload = {}
     
-    valid, reason = _validate_webhook(payload)
-    if not valid:
-        _log("warning", "webhook_invalid", reason=reason)
-        return JSONResponse({"status": "invalid", "reason": reason}, status_code=400, headers=CORS)
-    
+    # Beyond Presence validation - accept any request that doesn't have call_ended
     event_type = payload.get("event_type")
-    call_id = payload.get("call_id")
     
-    if event_type == "test":
+    # Validation/ping requests - return 200 OK
+    if not payload or event_type in (None, "test", "ping", "validation"):
+        _log("info", "webhook_validation", event_type=event_type)
         return JSONResponse({"status": "ok"}, headers=CORS)
+    
+    # For actual events, validate properly
+    if event_type == "call_ended":
+        valid, reason = _validate_webhook(payload)
+        if not valid:
+            _log("warning", "webhook_invalid", reason=reason)
+            return JSONResponse({"status": "invalid", "reason": reason}, status_code=400, headers=CORS)
+    
+    call_id = payload.get("call_id")
     
     if event_type != "call_ended":
         return JSONResponse({"status": "ignored", "event_type": event_type}, headers=CORS)

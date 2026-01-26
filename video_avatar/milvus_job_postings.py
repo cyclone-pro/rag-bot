@@ -519,7 +519,18 @@ def insert_job_postings(
         _log_event("error", "milvus_insert_failed", error=str(exc))
         raise
 
-
+def sync_jobs_to_milvus(jobs: List[Dict[str, Any]]) -> Tuple[int, int]:
+    """Sync multiple jobs to Milvus. Returns (success_count, fail_count)."""
+    success, fail = 0, 0
+    for job in jobs:
+        try:
+            if insert_job_posting(job):
+                success += 1
+            else:
+                fail += 1
+        except Exception:
+            fail += 1
+    return success, fail
 # ---------------------------
 # Public API: Health Check
 # ---------------------------

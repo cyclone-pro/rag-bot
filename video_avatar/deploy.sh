@@ -1,5 +1,5 @@
 #!/bin/bash
-# deploy.sh - Deploy Bey Webhook to Cloud Run
+# deploy.sh - Deploy Bey Webhook to Cloud Run using Cloud Build
 
 set -e
 
@@ -15,13 +15,9 @@ echo "   Region: ${REGION}"
 echo "   Service: ${SERVICE_NAME}"
 echo ""
 
-# Build
-echo "🐳 Building Docker image..."
-docker build -t ${IMAGE}:latest .
-
-# Push
-echo "📤 Pushing to Container Registry..."
-docker push ${IMAGE}:latest
+# Build using Cloud Build (no local Docker needed)
+echo "☁️  Building with Cloud Build..."
+gcloud builds submit --tag ${IMAGE}:latest .
 
 # Deploy
 echo "🚀 Deploying to Cloud Run..."
@@ -38,7 +34,7 @@ gcloud run deploy ${SERVICE_NAME} \
     --min-instances 0 \
     --max-instances 10 \
     --set-env-vars "PYTHONUNBUFFERED=1,MILVUS_PORT=19530,MILVUS_COLLECTION=job_postings,SIMILARITY_THRESHOLD=0.90,MAX_SIMILAR_JOBS=3,BEY_API_URL=https://api.bey.dev/v1" \
-    --set-secrets "DATABASE_URL=bey-webhook-db-url:latest,OPENAI_API_KEY=openai-api-key:latest,MILVUS_HOST=milvus-host:latest,BEY_API_KEY=bey-api-key:latest,ADMIN_API_KEY=admin-api-key:latest"
+    --set-secrets "DATABASE_URL=bey-webhook-db-url:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,MILVUS_HOST=milvus-host:latest,BEY_API_KEY=bey-api-key:latest,ADMIN_API_KEY=admin-api-key:latest"
 
 SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} --region ${REGION} --format 'value(status.url)')
 echo ""
