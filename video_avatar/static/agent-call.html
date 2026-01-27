@@ -1,175 +1,434 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>Avatar Call</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&family=Newsreader:opsz,wght@6..72,500&display=swap"
-      rel="stylesheet"
-    />
-    <style>
-      :root {
-        --ink: #f6f2ea;
-        --muted: #b8b1a6;
-        --accent: #c9643b;
-        --panel: #1e1b17;
-        --panel-border: #2d2823;
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Call with Ava - Recruiter.AI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0f1a;
+      --bg-card: #111827;
+      --accent-blue: #3b82f6;
+      --accent-cyan: #22d3ee;
+      --text-primary: #f9fafb;
+      --text-secondary: #9ca3af;
+      --border: #1f2937;
+      --danger: #ef4444;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Loading Screen */
+    .loading-screen {
+      position: fixed;
+      inset: 0;
+      background: var(--bg-dark);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      transition: opacity 0.5s ease, visibility 0.5s ease;
+    }
+
+    .loading-screen.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .loading-logo {
+      width: 120px;
+      height: 120px;
+      margin-bottom: 2rem;
+      animation: pulse-glow 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-glow {
+      0%, 100% {
+        filter: drop-shadow(0 0 20px rgba(59, 130, 246, 0.5));
+        transform: scale(1);
       }
-      body {
-        margin: 0;
-        font-family: "Space Grotesk", "Newsreader", sans-serif;
-        background: radial-gradient(circle at top, #2b2722, #0f0d0b 65%);
-        color: var(--ink);
+      50% {
+        filter: drop-shadow(0 0 40px rgba(59, 130, 246, 0.8));
+        transform: scale(1.05);
       }
-      .toolbar {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 16px;
-        background: var(--panel);
-        border-bottom: 1px solid var(--panel-border);
-      }
-      .status {
-        flex: 1;
-        font-size: 14px;
-        color: var(--muted);
-      }
-      .button {
-        background: var(--accent);
-        color: #ffffff;
-        border: none;
-        padding: 8px 12px;
-        border-radius: 8px;
-        cursor: pointer;
-        font-weight: 600;
-      }
-      .button.secondary {
-        background: #2f2a24;
-      }
-      .video-wrap {
-        display: grid;
-        place-items: center;
-        height: calc(100vh - 56px);
-        background: radial-gradient(circle at center, #24201b, #0d0b09);
-      }
-      video {
-        width: min(960px, 100%);
-        max-height: 85vh;
-        border-radius: 16px;
-        background: #0c0b0a;
-      }
-      .hint {
-        position: fixed;
-        bottom: 12px;
-        right: 16px;
-        font-size: 12px;
-        color: var(--muted);
-      }
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
-  </head>
-  <body>
-    <div class="toolbar">
-      <div class="status" id="status">Preparing call...</div>
-      <button class="button secondary" id="mute-btn">Mute</button>
-      <button class="button" id="end-btn">End Call</button>
+    }
+
+    .loading-text {
+      font-size: 1.25rem;
+      color: var(--text-primary);
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+
+    .loading-subtext {
+      font-size: 1rem;
+      color: var(--text-secondary);
+      text-align: center;
+    }
+
+    .loading-dots {
+      display: inline-flex;
+      gap: 4px;
+      margin-left: 4px;
+    }
+
+    .loading-dots span {
+      width: 6px;
+      height: 6px;
+      background: var(--accent-cyan);
+      border-radius: 50%;
+      animation: bounce 1.4s ease-in-out infinite;
+    }
+
+    .loading-dots span:nth-child(1) { animation-delay: 0s; }
+    .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40% { transform: translateY(-8px); }
+    }
+
+    /* Toolbar */
+    .toolbar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 20px;
+      background: rgba(17, 24, 39, 0.95);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+      z-index: 50;
+    }
+
+    .toolbar-logo {
+      width: 32px;
+      height: 32px;
+    }
+
+    .toolbar-title {
+      font-weight: 600;
+      font-size: 1rem;
+    }
+
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-secondary);
+    }
+
+    .status-dot.connected {
+      background: #22c55e;
+      animation: blink 2s infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .btn {
+      padding: 8px 16px;
+      border-radius: 8px;
+      border: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: #1f2937;
+    }
+
+    .btn-danger {
+      background: var(--danger);
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background: #dc2626;
+    }
+
+    /* Video Container */
+    .video-container {
+      position: fixed;
+      inset: 0;
+      padding-top: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at center, #1a1f2e, var(--bg-dark));
+    }
+
+    video {
+      max-width: 100%;
+      max-height: 100%;
+      width: auto;
+      height: auto;
+      border-radius: 16px;
+      background: #000;
+    }
+
+    /* Error State */
+    .error-container {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-dark);
+      z-index: 100;
+      display: none;
+    }
+
+    .error-container.visible {
+      display: flex;
+    }
+
+    .error-icon {
+      font-size: 4rem;
+      margin-bottom: 1rem;
+    }
+
+    .error-text {
+      font-size: 1.25rem;
+      color: var(--text-primary);
+      margin-bottom: 0.5rem;
+    }
+
+    .error-subtext {
+      font-size: 1rem;
+      color: var(--text-secondary);
+      margin-bottom: 1.5rem;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+</head>
+<body>
+  <!-- Loading Screen -->
+  <div class="loading-screen" id="loading-screen">
+    <img src="/static/logo.png" alt="Recruiter.AI" class="loading-logo" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2245%22 fill=%22%231e3a5f%22 stroke=%22%233b82f6%22 stroke-width=%222%22/><path d=%22M30 70L50 30L70 70Z%22 fill=%22%2322d3ee%22/></svg>'">
+    <div class="loading-text">
+      Ava is wrapping up another call<span class="loading-dots"><span></span><span></span><span></span></span>
     </div>
-    <div class="video-wrap">
-      <video id="remote-video" autoplay playsinline></video>
+    <div class="loading-subtext">She'll be with you in just a moment</div>
+  </div>
+
+  <!-- Error Screen -->
+  <div class="error-container" id="error-screen">
+    <div class="error-icon">😔</div>
+    <div class="error-text">Unable to connect</div>
+    <div class="error-subtext" id="error-message">Something went wrong</div>
+    <button class="btn btn-secondary" onclick="window.close()">Close</button>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <img src="/static/logo.png" alt="" class="toolbar-logo" onerror="this.style.display='none'">
+    <span class="toolbar-title">Recruiter.AI</span>
+    <div class="status-indicator">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text">Connecting...</span>
     </div>
-    <div class="hint" id="hint"></div>
+    <button class="btn btn-secondary" id="mute-btn">Mute</button>
+    <button class="btn btn-danger" id="end-btn">End Call</button>
+  </div>
 
-    <script>
-      const statusEl = document.getElementById("status");
-      const hintEl = document.getElementById("hint");
-      const muteBtn = document.getElementById("mute-btn");
-      const endBtn = document.getElementById("end-btn");
-      const videoEl = document.getElementById("remote-video");
+  <!-- Video -->
+  <div class="video-container">
+    <video id="remote-video" autoplay playsinline></video>
+  </div>
 
-      const params = new URLSearchParams(window.location.search);
-      const livekitUrl = params.get("livekit_url") || localStorage.getItem("livekit_url");
-      const livekitToken = params.get("livekit_token") || localStorage.getItem("livekit_token");
-      const callId = params.get("call_id") || localStorage.getItem("livekit_call_id");
+  <!-- Audio elements container -->
+  <div id="audio-container" style="display:none;"></div>
 
-      let room = null;
-      let micEnabled = true;
+  <script>
+    const loadingScreen = document.getElementById('loading-screen');
+    const errorScreen = document.getElementById('error-screen');
+    const errorMessage = document.getElementById('error-message');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const muteBtn = document.getElementById('mute-btn');
+    const endBtn = document.getElementById('end-btn');
+    const videoEl = document.getElementById('remote-video');
+    const audioContainer = document.getElementById('audio-container');
 
-      function setStatus(text) {
-        statusEl.textContent = text;
+    // Get params from URL
+    const params = new URLSearchParams(window.location.search);
+    const livekitUrl = params.get('livekit_url');
+    const livekitToken = params.get('livekit_token');
+    const callId = params.get('call_id');
+
+    let room = null;
+    let micEnabled = true;
+
+    function setStatus(text, connected = false) {
+      statusText.textContent = text;
+      statusDot.classList.toggle('connected', connected);
+    }
+
+    function showError(message) {
+      errorMessage.textContent = message;
+      errorScreen.classList.add('visible');
+      loadingScreen.classList.add('hidden');
+    }
+
+    function hideLoading() {
+      loadingScreen.classList.add('hidden');
+    }
+
+    async function connectCall() {
+      if (!livekitUrl || !livekitToken) {
+        showError('Missing connection credentials. Please try again.');
+        return;
       }
 
-      function setHint(text) {
-        hintEl.textContent = text || "";
+      if (!window.LivekitClient) {
+        showError('Failed to load video client. Please refresh the page.');
+        return;
       }
 
-      async function connectCall() {
-        if (!livekitUrl || !livekitToken) {
-          setStatus("Missing LiveKit credentials.");
-          setHint("Open the launcher and rerun create.py for a fresh call.");
-          return;
+      const { Room } = window.LivekitClient;
+      room = new Room({ 
+        adaptiveStream: true, 
+        dynacast: true,
+        videoCaptureDefaults: {
+          resolution: { width: 640, height: 480 }
         }
+      });
 
-        if (!window.LivekitClient) {
-          setStatus("LiveKit client failed to load.");
-          return;
+      // Connection state
+      room.on('connectionStateChanged', (state) => {
+        console.log('Connection state:', state);
+        if (state === 'connected') {
+          setStatus('Connected', true);
+        } else if (state === 'disconnected') {
+          setStatus('Disconnected', false);
+        } else if (state === 'reconnecting') {
+          setStatus('Reconnecting...', false);
         }
+      });
 
-        const { Room } = window.LivekitClient;
-        room = new Room({ adaptiveStream: true, dynacast: true });
+      // Track subscribed - avatar video/audio
+      room.on('trackSubscribed', (track, publication, participant) => {
+        console.log('Track subscribed:', track.kind, participant.identity);
+        
+        if (track.kind === 'video') {
+          track.attach(videoEl);
+          hideLoading();
+        }
+        
+        if (track.kind === 'audio') {
+          const audioEl = track.attach();
+          audioEl.autoplay = true;
+          audioEl.volume = 1.0;
+          audioContainer.appendChild(audioEl);
+        }
+      });
 
-        room.on("connectionStateChanged", (state) => {
-          setStatus(`Connection: ${state}`);
-        });
+      // Track unsubscribed
+      room.on('trackUnsubscribed', (track) => {
+        track.detach();
+      });
 
-        room.on("trackSubscribed", (track) => {
-          if (track.kind === "video") {
-            track.attach(videoEl);
-          }
-          if (track.kind === "audio") {
-            const audioEl = track.attach();
-            audioEl.autoplay = true;
-            document.body.appendChild(audioEl);
-          }
-        });
+      // Disconnected
+      room.on('disconnected', (reason) => {
+        console.log('Disconnected:', reason);
+        setStatus('Call ended', false);
+      });
 
-        room.on("disconnected", () => {
-          setStatus("Disconnected.");
-        });
-
-        setStatus("Connecting...");
+      // Connect
+      try {
+        setStatus('Connecting...');
         await room.connect(livekitUrl, livekitToken);
-        setStatus("Connected.");
-        if (callId) {
-          setHint(`Call ID: ${callId}`);
-        }
+        setStatus('Connected', true);
 
+        // Enable microphone
         try {
           await room.localParticipant.setMicrophoneEnabled(true);
           micEnabled = true;
-          muteBtn.textContent = "Mute";
+          muteBtn.textContent = 'Mute';
         } catch (err) {
-          setHint("Mic permission not granted.");
+          console.warn('Microphone permission denied:', err);
+          muteBtn.textContent = 'Mic Off';
+          micEnabled = false;
         }
+      } catch (err) {
+        console.error('Connection failed:', err);
+        showError('Failed to connect. Please try again.');
       }
+    }
 
-      muteBtn.addEventListener("click", async () => {
-        if (!room) return;
-        micEnabled = !micEnabled;
+    // Mute/Unmute
+    muteBtn.addEventListener('click', async () => {
+      if (!room) return;
+      
+      micEnabled = !micEnabled;
+      try {
         await room.localParticipant.setMicrophoneEnabled(micEnabled);
-        muteBtn.textContent = micEnabled ? "Mute" : "Unmute";
-      });
+        muteBtn.textContent = micEnabled ? 'Mute' : 'Unmute';
+      } catch (err) {
+        console.error('Failed to toggle mic:', err);
+      }
+    });
 
-      endBtn.addEventListener("click", () => {
-        if (room) {
-          room.disconnect();
-        }
-        window.close();
-      });
+    // End Call
+    endBtn.addEventListener('click', () => {
+      if (room) {
+        room.disconnect();
+      }
+      setStatus('Call ended', false);
+      setTimeout(() => window.close(), 1000);
+    });
 
-      connectCall();
-    </script>
-  </body>
+    // Handle page close
+    window.addEventListener('beforeunload', () => {
+      if (room) {
+        room.disconnect();
+      }
+    });
+
+    // Start connection
+    connectCall();
+  </script>
+</body>
 </html>
