@@ -289,7 +289,16 @@
           });
           
           clearStatus();
-          window.open('/call?' + params.toString(), '_blank');
+          
+          // Try window.open first, fall back to navigation
+          const callUrl = '/call?' + params.toString();
+          const newWindow = window.open(callUrl, '_blank');
+          
+          // If popup was blocked, navigate in same tab
+          if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+            setStatus('Opening call page...', 'loading');
+            window.location.href = callUrl;
+          }
         } else if (data.retry) {
           setStatus(data.message || 'Connection failed. Please try again.', 'error');
         } else {
