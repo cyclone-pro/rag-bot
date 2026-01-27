@@ -49,10 +49,17 @@ CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POS
 def _log(level: str, msg: str, **kw: Any) -> None:
     getattr(logger, level if level in ("warning", "error") else "info")(json.dumps({"message": msg, **kw}))
 
+def _payload_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    messages = payload.get("messages")
+    return {
+        "call_id": payload.get("call_id"),
+        "event_type": payload.get("event_type"),
+        "message_count": len(messages) if isinstance(messages, list) else None,
+    }
+
 def _openai_client() -> AsyncOpenAI:
     global _openai
     if _openai is None:
-        _log("info", "openai_client_init", key_set=bool(os.getenv("OPENAI_API_KEY")), model=OPENAI_MODEL)
         _openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     return _openai
 
@@ -167,6 +174,10 @@ RULES:
 6. Do NOT invent data - use null for unknown fields
 7. If multiple roles discussed, create separate role objects
 8. location_cities and location_states arrays MUST have same length
+9. IMPORTANT: "C2H" or "CTH" means Contract-to-Hire (job_type), NOT C2C (employment_type). 
+   - job_type: Contract-to-hire means the position starts as contract and converts to full-time
+   - employment_type: C2C/W2/1099 refers to HOW the contractor is paid (corp-to-corp, W2 employee, independent contractor)
+   - If employment_type is not explicitly mentioned (W2, C2C, 1099), use "unspecified"
 '''
 
 FILLER_RE = re.compile(r"(?i)\b(?:um+|uh+|ah+|er+|hmm+|okay|alright|yeah|yep|so|like)\b(?=\s*[.,!?]|\s*$)")
@@ -237,21 +248,31 @@ def _verify_admin(key: Optional[str]) -> bool:
 async def _process_call(call_id: str, payload: Dict) -> None:
     """Background task to process a call."""
     start = time.time()
-    _log("info", "process_call_start", call_id=call_id, event_type=payload.get("event_type"))
     await _log_proc(call_id, "webhook_received", message="Processing started")
     await update_call_transcript(call_id, status="processing")
     
     messages = payload.get("messages", [])
+    messages_source = "payload"
+    await _log_proc(call_id, "messages_loaded", metadata={"source": messages_source, "count": len(messages)})
     if not messages:
+        messages_source = "db"
+        t0 = time.time()
+        await _log_proc(call_id, "messages_fetch_started", metadata={"source": messages_source})
         transcript = await fetch_call_transcript(call_id)
         messages = transcript.get("messages", []) if transcript else []
+        await _log_proc(
+            call_id,
+            "messages_fetch_complete",
+            metadata={"source": messages_source, "count": len(messages)},
+            duration_ms=int((time.time() - t0) * 1000),
+        )
     
     # Clean transcript
     t0 = time.time()
     cleaned = _clean_transcript(messages)
     redacted = _redact_pii(cleaned)
     await _log_proc(call_id, "transcript_cleaned", message="Cleaned", 
-                    metadata={"chars": len(cleaned), "messages": len(messages)},
+                    metadata={"chars": len(cleaned), "messages": len(messages), "source": messages_source},
                     duration_ms=int((time.time()-t0)*1000))
     
     if not cleaned.strip():
@@ -412,39 +433,43 @@ async def webhook(request: Request):
     # Handle empty body or validation ping
     try:
         payload = await request.json()
-    except:
+        _log("info", "webhook_json_parsed", **_payload_meta(payload))
+    except Exception as exc:
         payload = {}
+        _log("warning", "webhook_json_parse_failed", error=str(exc))
     
     # Beyond Presence validation - accept any request that doesn't have call_ended
     event_type = payload.get("event_type")
-    _log("info", "webhook_received", event_type=event_type, call_id=payload.get("call_id"))
+    call_id = payload.get("call_id")
+    _log("info", "webhook_request_received", call_id=call_id, event_type=event_type)
     
     # Validation/ping requests - return 200 OK
     if not payload or event_type in (None, "test", "ping", "validation"):
-        _log("info", "webhook_validation", event_type=event_type)
+        _log("info", "webhook_validation", call_id=call_id, event_type=event_type)
         return JSONResponse({"status": "ok"}, headers=CORS)
     
     # For actual events, validate properly
     if event_type == "call_ended":
         valid, reason = _validate_webhook(payload)
         if not valid:
-            _log("warning", "webhook_invalid", reason=reason)
+            _log("warning", "webhook_invalid", call_id=call_id, event_type=event_type, reason=reason)
             return JSONResponse({"status": "invalid", "reason": reason}, status_code=400, headers=CORS)
     
-    call_id = payload.get("call_id")
-    
     if event_type != "call_ended":
-        _log("info", "webhook_ignored", event_type=event_type, call_id=call_id)
+        _log("info", "webhook_ignored", call_id=call_id, event_type=event_type)
         return JSONResponse({"status": "ignored", "event_type": event_type}, headers=CORS)
     
     # Store and process
     try:
+        _log("info", "webhook_store_started", call_id=call_id, event_type=event_type)
         await insert_call_transcript(payload)
+        _log("info", "webhook_store_complete", call_id=call_id, event_type=event_type)
     except Exception as e:
-        _log("error", "webhook_db_error", call_id=call_id, error=str(e))
+        _log("error", "webhook_db_error", call_id=call_id, event_type=event_type, error=str(e))
         return JSONResponse({"status": "db_error", "error": str(e)}, status_code=500, headers=CORS)
     
     asyncio.create_task(_process_call(call_id, payload))
+    _log("info", "webhook_processing_enqueued", call_id=call_id, event_type=event_type)
     return JSONResponse({"status": "accepted", "call_id": call_id}, headers=CORS)
 
 
@@ -478,15 +503,26 @@ async def health_milvus():
 
 @app.get("/api/stats")
 async def api_stats():
+    _log("info", "api_stats_started")
     stats = await fetch_stats()
+    _log("info", "api_stats_complete", keys=list(stats.keys())[:10] if isinstance(stats, dict) else None)
     return JSONResponse(stats, headers=CORS)
 
 @app.get("/api/calls/{call_id}/status")
 async def api_call_status(call_id: str):
+    _log("info", "api_call_status_started", call_id=call_id)
     transcript = await fetch_call_transcript(call_id)
     if not transcript:
+        _log("warning", "api_call_status_not_found", call_id=call_id)
         raise HTTPException(404, "Call not found")
     logs = await fetch_processing_logs(call_id)
+    _log(
+        "info",
+        "api_call_status_complete",
+        call_id=call_id,
+        status=transcript.get("status"),
+        log_count=len(logs) if isinstance(logs, list) else None,
+    )
     return JSONResponse({
         "call_id": call_id,
         "status": transcript.get("status"),
@@ -498,81 +534,100 @@ async def api_call_status(call_id: str):
 
 @app.get("/api/calls/{call_id}/logs")
 async def api_call_logs(call_id: str):
+    _log("info", "api_call_logs_started", call_id=call_id)
     logs = await fetch_processing_logs(call_id)
+    _log("info", "api_call_logs_complete", call_id=call_id, log_count=len(logs) if isinstance(logs, list) else None)
     return JSONResponse({"call_id": call_id, "logs": logs}, headers=CORS)
 
 @app.post("/api/calls/{call_id}/reprocess")
 async def api_reprocess(call_id: str, x_admin_key: Optional[str] = Header(None)):
+    _log("info", "api_reprocess_started", call_id=call_id)
     if not _verify_admin(x_admin_key):
-        _log("warning", "admin_auth_failed", endpoint="reprocess", call_id=call_id)
+        _log("warning", "api_reprocess_unauthorized", call_id=call_id)
         raise HTTPException(401, "Invalid admin key")
-    _log("info", "admin_reprocess_requested", call_id=call_id)
     
     transcript = await fetch_call_transcript(call_id)
     if not transcript:
+        _log("warning", "api_reprocess_not_found", call_id=call_id)
         raise HTTPException(404, "Call not found")
     if transcript.get("status") != "failed":
+        _log("warning", "api_reprocess_invalid_status", call_id=call_id, status=transcript.get("status"))
         raise HTTPException(400, f"Call status is '{transcript.get('status')}', not 'failed'")
     
     payload = transcript.get("raw_payload", {})
     payload["call_id"] = call_id
     asyncio.create_task(_process_call(call_id, payload))
+    _log("info", "api_reprocess_enqueued", call_id=call_id)
     return JSONResponse({"status": "reprocessing", "call_id": call_id}, headers=CORS)
 
 @app.post("/api/calls/ingest")
 async def api_ingest(request: Request, x_admin_key: Optional[str] = Header(None)):
+    _log("info", "api_ingest_started")
     if not _verify_admin(x_admin_key):
-        _log("warning", "admin_auth_failed", endpoint="ingest")
+        _log("warning", "api_ingest_unauthorized")
         raise HTTPException(401, "Invalid admin key")
     
     body = await request.json()
     call_id = body.get("call_id")
-    _log("info", "admin_ingest_requested", call_id=call_id)
     if not call_id:
+        _log("warning", "api_ingest_missing_call_id")
         raise HTTPException(400, "call_id required")
+    _log("info", "api_ingest_call_id", call_id=call_id)
     
     # Check if already exists
     existing = await fetch_call_transcript(call_id)
     if existing:
+        _log("warning", "api_ingest_conflict", call_id=call_id, status=existing.get("status"))
         raise HTTPException(409, f"Call {call_id} already exists")
     
     # Fetch from Beyond Presence API
+    _log("info", "api_ingest_fetch_started", call_id=call_id)
     payload = await asyncio.to_thread(build_webhook_payload, call_id)
     if not payload:
+        _log("warning", "api_ingest_not_found_upstream", call_id=call_id)
         raise HTTPException(404, f"Call {call_id} not found in Beyond Presence")
+    _log("info", "api_ingest_fetch_complete", **_payload_meta(payload))
     
     try:
+        _log("info", "api_ingest_store_started", call_id=call_id)
         await insert_call_transcript(payload)
+        _log("info", "api_ingest_store_complete", call_id=call_id)
     except Exception as e:
+        _log("error", "api_ingest_store_failed", call_id=call_id, error=str(e))
         raise HTTPException(500, f"DB error: {e}")
     
     asyncio.create_task(_process_call(call_id, payload))
+    _log("info", "api_ingest_enqueued", call_id=call_id)
     return JSONResponse({"status": "ingesting", "call_id": call_id}, headers=CORS)
 
 @app.post("/api/milvus/sync")
 async def api_milvus_sync(x_admin_key: Optional[str] = Header(None)):
+    _log("info", "api_milvus_sync_started")
     if not _verify_admin(x_admin_key):
-        _log("warning", "admin_auth_failed", endpoint="milvus_sync")
+        _log("warning", "api_milvus_sync_unauthorized")
         raise HTTPException(401, "Invalid admin key")
-    _log("info", "milvus_sync_requested")
     
     jobs = await fetch_unsynced_jobs(100)
     if not jobs:
-        _log("info", "milvus_sync_noop", unsynced=0)
+        _log("info", "api_milvus_sync_no_jobs")
         return JSONResponse({"status": "ok", "synced": 0, "failed": 0}, headers=CORS)
+    _log("info", "api_milvus_sync_jobs_loaded", count=len(jobs))
     
     success, fail = await asyncio.to_thread(sync_jobs_to_milvus, jobs)
-    _log("info", "milvus_sync_result", synced=success, failed=fail, total=len(jobs))
+    _log("info", "api_milvus_sync_complete", success=success, fail=fail, total=len(jobs))
     
     # Update synced status
     for job in jobs[:success]:
         await update_job_milvus_status(job["job_id"], True)
+    _log("info", "api_milvus_sync_status_updated", updated=min(success, len(jobs)))
     
     return JSONResponse({"status": "ok", "synced": success, "failed": fail, "total": len(jobs)}, headers=CORS)
 
 @app.get("/api/failed")
 async def api_failed():
+    _log("info", "api_failed_started")
     calls = await fetch_failed_calls()
+    _log("info", "api_failed_complete", count=len(calls) if isinstance(calls, list) else None)
     return JSONResponse({"failed_calls": calls}, headers=CORS)
 
 
@@ -592,10 +647,12 @@ async def api_create_call(request: Request):
     """
     try:
         body = await request.json()
-    except:
+    except Exception as exc:
         body = {}
+        _log("warning", "api_create_call_json_parse_failed", error=str(exc))
     
     username = body.get("username", "Vendor")
+    _log("info", "api_create_call_started", username=username)
     
     # Step 1: Fetch call history
     try:
@@ -611,12 +668,19 @@ async def api_create_call(request: Request):
         username=username,
         agent_name=f"Ava - Recruiter ({datetime.now().strftime('%H:%M')})",
     )
+    _log(
+        "info",
+        "create_call_agent_config_built",
+        name=agent_config.get("name"),
+        avatar_id=agent_config.get("avatar_id"),
+    )
     
     # Step 3: Create agent (with retry)
     agent = None
     last_error = None
     for attempt in range(3):
         try:
+            _log("info", "create_call_agent_attempt", attempt=attempt + 1)
             agent = await asyncio.to_thread(
                 create_agent,
                 name=agent_config["name"],
@@ -645,6 +709,7 @@ async def api_create_call(request: Request):
     call = None
     for attempt in range(3):
         try:
+            _log("info", "create_call_attempt", attempt=attempt + 1, agent_id=agent_id)
             call = await asyncio.to_thread(
                 create_call,
                 agent_id=agent_id,
@@ -694,7 +759,9 @@ async def api_create_call_options():
 async def api_call_history():
     """Get recent call history with job summaries."""
     try:
+        _log("info", "api_call_history_started")
         summaries = await asyncio.to_thread(get_recent_job_summaries, 10)
+        _log("info", "api_call_history_complete", count=len(summaries) if isinstance(summaries, list) else None)
         return JSONResponse({"calls": summaries}, headers=CORS)
     except Exception as e:
         _log("error", "api_call_history_failed", error=str(e))

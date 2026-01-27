@@ -427,31 +427,58 @@ def insert_job_posting(
         raise RuntimeError("MILVUS_URI or MILVUS_HOST is not configured")
 
     if not isinstance(role, dict):
+        _log_event("warning", "milvus_insert_skipped_not_dict")
         return False
+
+    job_id_raw = role.get("job_id")
+    _log_event("info", "milvus_insert_preparing", job_id=job_id_raw)
 
     posting, jd_text = _prepare_posting(role)
     
     if not posting.get("job_id"):
-        _log_event("warning", "milvus_insert_skipped_no_job_id")
+        _log_event(
+            "warning",
+            "milvus_insert_skipped_no_job_id",
+            role_keys=list(role.keys())[:15],
+        )
         return False
 
     # Use pre-computed embedding or generate new one
     if embedding is None:
+        _log_event(
+            "info",
+            "milvus_generating_embedding",
+            job_id=posting.get("job_id"),
+            text_len=len(jd_text),
+        )
         embedding = generate_embedding(jd_text)
     
     if len(embedding) != EMBEDDING_DIM:
-        _log_event("error", "embedding_dimension_mismatch", expected=EMBEDDING_DIM, got=len(embedding))
+        _log_event(
+            "error",
+            "embedding_dimension_mismatch",
+            expected=EMBEDDING_DIM,
+            got=len(embedding),
+            job_id=posting.get("job_id"),
+        )
         return False
 
     posting["jd_embedding"] = embedding
 
     try:
+        _log_event("info", "milvus_insert_connecting", job_id=posting.get("job_id"))
         collection = _get_collection()
         
         if _company_is_array(collection):
             company_value = posting.get("company") or "Unknown"
             posting["company"] = [company_value]
         
+        _log_event(
+            "info",
+            "milvus_insert_executing",
+            job_id=posting.get("job_id"),
+            posting_keys=list(posting.keys()),
+        )
         collection.insert([posting])
         
         _log_event("info", "milvus_insert_single_ok", job_id=posting.get("job_id"))
@@ -502,6 +529,13 @@ def insert_job_postings(
     ]
     _log_event(
         "info",
+        "milvus_insert_batch_start",
+        count=len(postings),
+        sample_jobs=sample_jobs,
+        sample_truncated=len(postings) > 10,
+    )
+    _log_event(
+        "info",
         "milvus_insert_start",
         count=len(postings),
         sample_jobs=sample_jobs,
@@ -528,28 +562,37 @@ def insert_job_postings(
                 posting["company"] = [company_value]
         
         collection.insert(postings)
+        _log_event("info", "milvus_insert_batch_ok", count=len(postings))
         _log_event("info", "milvus_insert_ok", count=len(postings))
         return len(postings)
         
     except Exception as exc:
+        _log_event("error", "milvus_insert_batch_failed", error=str(exc))
         _log_event("error", "milvus_insert_failed", error=str(exc))
         raise
+
 
 def sync_jobs_to_milvus(jobs: List[Dict[str, Any]]) -> Tuple[int, int]:
     """Sync multiple jobs to Milvus. Returns (success_count, fail_count)."""
     success, fail = 0, 0
     _log_event("info", "milvus_sync_start", total=len(jobs))
     for job in jobs:
+        job_id = job.get("job_id", "unknown")
         try:
+            _log_event("info", "milvus_sync_item_start", job_id=job_id)
             if insert_job_posting(job):
                 success += 1
+                _log_event("info", "milvus_sync_item_ok", job_id=job_id)
             else:
                 fail += 1
+                _log_event("warning", "milvus_sync_item_returned_false", job_id=job_id)
         except Exception as exc:
-            _log_event("error", "milvus_sync_item_failed", job_id=job.get("job_id"), error=str(exc))
+            _log_event("error", "milvus_sync_item_failed", job_id=job_id, error=str(exc))
             fail += 1
     _log_event("info", "milvus_sync_complete", success=success, fail=fail)
     return success, fail
+
+
 # ---------------------------
 # Public API: Health Check
 # ---------------------------
