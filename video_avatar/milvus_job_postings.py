@@ -91,6 +91,15 @@ def _get_embedder() -> SentenceTransformer:
 
 def _connect_milvus(alias: str, timeout: Optional[int] = None) -> None:
     kwargs: Dict[str, Any] = {"alias": alias}
+    _log_event(
+        "info",
+        "milvus_connect_start",
+        alias=alias,
+        using_uri=bool(MILVUS_URI),
+        host=MILVUS_HOST,
+        port=MILVUS_PORT,
+        timeout=timeout,
+    )
     if MILVUS_URI:
         kwargs["uri"] = MILVUS_URI
         if MILVUS_TOKEN:
@@ -102,19 +111,23 @@ def _connect_milvus(alias: str, timeout: Optional[int] = None) -> None:
         kwargs["timeout"] = timeout
     try:
         connections.connect(**kwargs)
+        _log_event("info", "milvus_connect_ok", alias=alias)
     except TypeError:
         kwargs.pop("timeout", None)
         connections.connect(**kwargs)
+        _log_event("info", "milvus_connect_ok", alias=alias, retried_without_timeout=True)
 
 
 def _get_collection() -> Collection:
     global _COLLECTION
     if _COLLECTION is None:
+        _log_event("info", "milvus_collection_load_start", collection=MILVUS_COLLECTION)
         _connect_milvus("job_postings")
         if not utility.has_collection(MILVUS_COLLECTION, using="job_postings"):
             raise RuntimeError(f"Milvus collection not found: {MILVUS_COLLECTION}")
         _COLLECTION = Collection(MILVUS_COLLECTION, using="job_postings")
         _COLLECTION.load()
+        _log_event("info", "milvus_collection_load_ok", collection=MILVUS_COLLECTION)
     return _COLLECTION
 
 
@@ -287,6 +300,7 @@ def generate_embedding(text: str) -> List[float]:
     The text is prefixed with 'passage: ' as required by e5 models.
     Returns a normalized embedding vector.
     """
+    _log_event("info", "embedding_generate_start", text_len=len(text))
     embedder = _get_embedder()
     input_text = f"passage: {text}"
     vector = embedder.encode(input_text, normalize_embeddings=True)
@@ -305,6 +319,7 @@ def generate_embeddings(texts: List[str]) -> List[List[float]]:
     if not texts:
         return []
     
+    _log_event("info", "embedding_generate_batch_start", count=len(texts))
     embedder = _get_embedder()
     inputs = [f"passage: {text}" for text in texts]
     vectors = embedder.encode(inputs, normalize_embeddings=True)
@@ -335,6 +350,7 @@ def search_similar_jobs(
         List of dicts with keys: job_id, score
         Sorted by score descending, only includes results above threshold.
     """
+    _log_event("info", "milvus_similarity_search_start", top_k=top_k, threshold=threshold)
     if not MILVUS_URI and not MILVUS_HOST:
         _log_event("warning", "milvus_not_configured_for_similarity_search")
         return []
@@ -522,14 +538,17 @@ def insert_job_postings(
 def sync_jobs_to_milvus(jobs: List[Dict[str, Any]]) -> Tuple[int, int]:
     """Sync multiple jobs to Milvus. Returns (success_count, fail_count)."""
     success, fail = 0, 0
+    _log_event("info", "milvus_sync_start", total=len(jobs))
     for job in jobs:
         try:
             if insert_job_posting(job):
                 success += 1
             else:
                 fail += 1
-        except Exception:
+        except Exception as exc:
+            _log_event("error", "milvus_sync_item_failed", job_id=job.get("job_id"), error=str(exc))
             fail += 1
+    _log_event("info", "milvus_sync_complete", success=success, fail=fail)
     return success, fail
 # ---------------------------
 # Public API: Health Check
@@ -537,11 +556,16 @@ def sync_jobs_to_milvus(jobs: List[Dict[str, Any]]) -> Tuple[int, int]:
 
 def check_milvus_connection(timeout: int = 5) -> Tuple[bool, str]:
     if not MILVUS_URI and not MILVUS_HOST:
+        _log_event("warning", "milvus_health_not_configured")
         return False, "MILVUS_URI or MILVUS_HOST not configured"
     try:
+        _log_event("info", "milvus_health_check_start", timeout=timeout)
         _connect_milvus("job_postings_health", timeout=timeout)
         if not utility.has_collection(MILVUS_COLLECTION, using="job_postings_health"):
+            _log_event("warning", "milvus_health_collection_missing", collection=MILVUS_COLLECTION)
             return False, f"collection not found: {MILVUS_COLLECTION}"
     except Exception as exc:
+        _log_event("error", "milvus_health_check_failed", error=str(exc))
         return False, str(exc)
+    _log_event("info", "milvus_health_check_ok")
     return True, "ok"

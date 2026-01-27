@@ -52,6 +52,7 @@ def _log(level: str, msg: str, **kw: Any) -> None:
 def _openai_client() -> AsyncOpenAI:
     global _openai
     if _openai is None:
+        _log("info", "openai_client_init", key_set=bool(os.getenv("OPENAI_API_KEY")), model=OPENAI_MODEL)
         _openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     return _openai
 
@@ -236,6 +237,7 @@ def _verify_admin(key: Optional[str]) -> bool:
 async def _process_call(call_id: str, payload: Dict) -> None:
     """Background task to process a call."""
     start = time.time()
+    _log("info", "process_call_start", call_id=call_id, event_type=payload.get("event_type"))
     await _log_proc(call_id, "webhook_received", message="Processing started")
     await update_call_transcript(call_id, status="processing")
     
@@ -415,6 +417,7 @@ async def webhook(request: Request):
     
     # Beyond Presence validation - accept any request that doesn't have call_ended
     event_type = payload.get("event_type")
+    _log("info", "webhook_received", event_type=event_type, call_id=payload.get("call_id"))
     
     # Validation/ping requests - return 200 OK
     if not payload or event_type in (None, "test", "ping", "validation"):
@@ -431,6 +434,7 @@ async def webhook(request: Request):
     call_id = payload.get("call_id")
     
     if event_type != "call_ended":
+        _log("info", "webhook_ignored", event_type=event_type, call_id=call_id)
         return JSONResponse({"status": "ignored", "event_type": event_type}, headers=CORS)
     
     # Store and process
@@ -500,7 +504,9 @@ async def api_call_logs(call_id: str):
 @app.post("/api/calls/{call_id}/reprocess")
 async def api_reprocess(call_id: str, x_admin_key: Optional[str] = Header(None)):
     if not _verify_admin(x_admin_key):
+        _log("warning", "admin_auth_failed", endpoint="reprocess", call_id=call_id)
         raise HTTPException(401, "Invalid admin key")
+    _log("info", "admin_reprocess_requested", call_id=call_id)
     
     transcript = await fetch_call_transcript(call_id)
     if not transcript:
@@ -516,10 +522,12 @@ async def api_reprocess(call_id: str, x_admin_key: Optional[str] = Header(None))
 @app.post("/api/calls/ingest")
 async def api_ingest(request: Request, x_admin_key: Optional[str] = Header(None)):
     if not _verify_admin(x_admin_key):
+        _log("warning", "admin_auth_failed", endpoint="ingest")
         raise HTTPException(401, "Invalid admin key")
     
     body = await request.json()
     call_id = body.get("call_id")
+    _log("info", "admin_ingest_requested", call_id=call_id)
     if not call_id:
         raise HTTPException(400, "call_id required")
     
@@ -544,13 +552,17 @@ async def api_ingest(request: Request, x_admin_key: Optional[str] = Header(None)
 @app.post("/api/milvus/sync")
 async def api_milvus_sync(x_admin_key: Optional[str] = Header(None)):
     if not _verify_admin(x_admin_key):
+        _log("warning", "admin_auth_failed", endpoint="milvus_sync")
         raise HTTPException(401, "Invalid admin key")
+    _log("info", "milvus_sync_requested")
     
     jobs = await fetch_unsynced_jobs(100)
     if not jobs:
+        _log("info", "milvus_sync_noop", unsynced=0)
         return JSONResponse({"status": "ok", "synced": 0, "failed": 0}, headers=CORS)
     
     success, fail = await asyncio.to_thread(sync_jobs_to_milvus, jobs)
+    _log("info", "milvus_sync_result", synced=success, failed=fail, total=len(jobs))
     
     # Update synced status
     for job in jobs[:success]:
