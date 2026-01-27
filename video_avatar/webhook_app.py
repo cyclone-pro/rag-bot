@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
 
 from db import (
@@ -23,12 +24,18 @@ from milvus_job_postings import (
     check_milvus_connection, generate_embedding, search_similar_jobs, 
     insert_job_posting, _build_jd_text, sync_jobs_to_milvus,
 )
-from bey_client import build_webhook_payload
+from bey_client import build_webhook_payload, create_agent, create_call, delete_agent
+from agent_prompt import build_agent_config
+from gcs_client import (
+    get_call_history, add_call_to_history, update_call_status,
+    mark_call_started, get_recent_job_summaries,
+)
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.90"))
 MAX_SIMILAR_JOBS = int(os.getenv("MAX_SIMILAR_JOBS", "3"))
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+MAX_BODY_SIZE = 1024 * 1024  # 1MB max body size for webhook
 
 app = FastAPI(title="Beyond Presence Webhook", version="2.0.0")
 _openai: Optional[AsyncOpenAI] = None
@@ -362,6 +369,33 @@ async def _process_call(call_id: str, payload: Dict) -> None:
         "jobs_created": [i["job_id"] for i in inserted],
     }
     await update_call_transcript(call_id, status="parsed", parsed_requirements=wrapper)
+    
+    # Update GCS call history with job summary
+    if inserted:
+        first_job = inserted[0]["role"]
+        job_summary = {
+            "job_title": first_job.get("job_title"),
+            "job_type": first_job.get("job_type"),
+            "seniority_level": first_job.get("seniority_level"),
+            "work_model": first_job.get("work_model"),
+            "pay_rate_min": first_job.get("pay_rate_min"),
+            "pay_rate_max": first_job.get("pay_rate_max"),
+            "salary_min": first_job.get("salary_min"),
+            "salary_max": first_job.get("salary_max"),
+            "must_have_skills": first_job.get("must_have_skills", [])[:5],
+            "location_cities": first_job.get("location_cities", []),
+        }
+        try:
+            agent_id = payload.get("call_data", {}).get("agentId") or payload.get("tags", {}).get("agent_id")
+            await asyncio.to_thread(update_call_status, call_id, "completed", job_summary)
+            
+            # Delete disposable agent
+            if agent_id and payload.get("tags", {}).get("disposable") == "true":
+                await asyncio.to_thread(delete_agent, agent_id)
+                _log("info", "disposable_agent_deleted", agent_id=agent_id)
+        except Exception as e:
+            _log("warning", "gcs_update_failed", call_id=call_id, error=str(e))
+    
     await _log_proc(call_id, "processing_complete", message="Done",
                    metadata={"roles_found": len(roles), "jobs_created": len(inserted)},
                    duration_ms=int((time.time()-start)*1000))
@@ -528,3 +562,152 @@ async def api_milvus_sync(x_admin_key: Optional[str] = Header(None)):
 async def api_failed():
     calls = await fetch_failed_calls()
     return JSONResponse({"failed_calls": calls}, headers=CORS)
+
+
+# ============================================================
+# CREATE CALL - Just-in-Time Agent Creation
+# ============================================================
+
+@app.post("/api/create-call")
+async def api_create_call(request: Request):
+    """Create a new call with Just-in-Time agent context.
+    
+    1. Fetch call history from GCS
+    2. Build dynamic greeting based on history
+    3. Create disposable agent with context
+    4. Create call with new agent
+    5. Return LiveKit credentials
+    """
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    username = body.get("username", "Vendor")
+    
+    # Step 1: Fetch call history
+    try:
+        call_history = await asyncio.to_thread(get_call_history)
+        _log("info", "create_call_history_loaded", count=len(call_history))
+    except Exception as e:
+        _log("warning", "create_call_history_failed", error=str(e))
+        call_history = []
+    
+    # Step 2: Build agent config with dynamic greeting
+    agent_config = build_agent_config(
+        call_history=call_history,
+        username=username,
+        agent_name=f"Ava - Recruiter ({datetime.now().strftime('%H:%M')})",
+    )
+    
+    # Step 3: Create agent (with retry)
+    agent = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            agent = await asyncio.to_thread(
+                create_agent,
+                name=agent_config["name"],
+                system_prompt=agent_config["system_prompt"],
+                greeting=agent_config["greeting"],
+                avatar_id=agent_config["avatar_id"],
+            )
+            if agent:
+                break
+        except Exception as e:
+            last_error = str(e)
+            _log("warning", "create_call_agent_retry", attempt=attempt+1, error=str(e))
+            await asyncio.sleep(1)
+    
+    if not agent or not agent.get("id"):
+        _log("error", "create_call_agent_failed", error=last_error)
+        return JSONResponse(
+            {"status": "error", "message": "Failed to create agent. Please try again.", "retry": True},
+            status_code=503, headers=CORS
+        )
+    
+    agent_id = agent["id"]
+    _log("info", "create_call_agent_created", agent_id=agent_id)
+    
+    # Step 4: Create call (with retry)
+    call = None
+    for attempt in range(3):
+        try:
+            call = await asyncio.to_thread(
+                create_call,
+                agent_id=agent_id,
+                username=username,
+                tags={"agent_id": agent_id, "username": username, "disposable": "true"},
+            )
+            if call:
+                break
+        except Exception as e:
+            _log("warning", "create_call_retry", attempt=attempt+1, error=str(e))
+            await asyncio.sleep(1)
+    
+    if not call or not call.get("id"):
+        # Cleanup agent
+        await asyncio.to_thread(delete_agent, agent_id)
+        _log("error", "create_call_failed", agent_id=agent_id)
+        return JSONResponse(
+            {"status": "error", "message": "Failed to create call. Please try again.", "retry": True},
+            status_code=503, headers=CORS
+        )
+    
+    call_id = call["id"]
+    _log("info", "create_call_success", call_id=call_id, agent_id=agent_id)
+    
+    # Step 5: Mark call as started in history
+    try:
+        await asyncio.to_thread(mark_call_started, call_id, agent_id, username)
+    except Exception as e:
+        _log("warning", "create_call_mark_started_failed", error=str(e))
+    
+    # Return LiveKit credentials
+    return JSONResponse({
+        "status": "ok",
+        "call_id": call_id,
+        "agent_id": agent_id,
+        "livekit_url": call.get("livekit_url"),
+        "livekit_token": call.get("livekit_token"),
+    }, headers=CORS)
+
+
+@app.options("/api/create-call")
+async def api_create_call_options():
+    return JSONResponse({}, headers=CORS)
+
+
+@app.get("/api/call-history")
+async def api_call_history():
+    """Get recent call history with job summaries."""
+    try:
+        summaries = await asyncio.to_thread(get_recent_job_summaries, 10)
+        return JSONResponse({"calls": summaries}, headers=CORS)
+    except Exception as e:
+        _log("error", "api_call_history_failed", error=str(e))
+        return JSONResponse({"calls": [], "error": str(e)}, headers=CORS)
+
+
+# ============================================================
+# STATIC FILES
+# ============================================================
+
+# Mount static files last to not override API routes
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    
+    @app.get("/")
+    async def index():
+        index_path = os.path.join(STATIC_DIR, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path)
+        return JSONResponse({"status": "ok", "message": "API running"})
+    
+    @app.get("/call")
+    async def call_page():
+        call_path = os.path.join(STATIC_DIR, "agent-call.html")
+        if os.path.exists(call_path):
+            return FileResponse(call_path)
+        raise HTTPException(404, "Call page not found")
