@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/Users/admin/Desktop/stuff/rag3/recruiterbrain-voice/app/livekit_agent/worker.py", line 15, in <module>
+    from livekit import api 
+    ^^^^^^^^^^^^^^^^^^^^^^^
+ModuleNotFoundError: No module named 'livekit'
