@@ -1,6 +1,7 @@
-"""Beyond Presence API client for fetching calls and messages."""
+"""Beyond Presence API client for agents, calls, and messages."""
 
 import os
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -11,34 +12,175 @@ logger = logging.getLogger("bey_client")
 BEY_API_URL = os.getenv("BEY_API_URL", "https://api.bey.dev/v1")
 BEY_API_KEY = os.getenv("BEY_API_KEY")
 
+DEFAULT_AVATAR_ID = "b63ba4e6-d346-45d0-ad28-5ddffaac0bd0_v2"
+
 
 def _log_event(level: str, message: str, **fields: Any) -> None:
-    import json
     payload = {"message": message, **fields}
     getattr(logger, level if level in ("warning", "error") else "info")(json.dumps(payload))
 
 
 def _get_headers() -> Dict[str, str]:
     """Get API headers with authentication."""
-    if not BEY_API_KEY:
+    api_key = BEY_API_KEY or os.getenv("BEY_API_KEY")
+    if not api_key:
         raise ValueError("BEY_API_KEY environment variable is not set")
     return {
-        "x-api-key": BEY_API_KEY,
+        "x-api-key": api_key,
         "Content-Type": "application/json",
     }
+
+
+# ============================================================
+# AGENT OPERATIONS
+# ============================================================
+
+def create_agent(
+    name: str,
+    system_prompt: str,
+    greeting: str,
+    avatar_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Create a new agent with Just-in-Time context.
+    
+    POST /v1/agent
+    
+    Returns agent object with id.
+    """
+    try:
+        payload = {
+            "name": name,
+            "system_prompt": system_prompt,
+            "greeting": greeting,
+            "avatar_id": avatar_id or DEFAULT_AVATAR_ID,
+        }
+        
+        response = requests.post(
+            f"{BEY_API_URL}/agent",
+            headers=_get_headers(),
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        _log_event("info", "bey_create_agent_ok", 
+                   agent_id=data.get("id"), 
+                   prompt_length=len(system_prompt))
+        return data
+    
+    except requests.exceptions.HTTPError as e:
+        _log_event("error", "bey_create_agent_failed",
+                   status_code=e.response.status_code if e.response else None,
+                   response_text=e.response.text if e.response else None,
+                   error=str(e))
+        return None
+    except Exception as e:
+        _log_event("error", "bey_create_agent_error", error=str(e))
+        return None
+
+
+def delete_agent(agent_id: str) -> bool:
+    """Delete a disposable agent after call ends.
+    
+    DELETE /v1/agent/{id}
+    """
+    try:
+        response = requests.delete(
+            f"{BEY_API_URL}/agent/{agent_id}",
+            headers=_get_headers(),
+            timeout=30,
+        )
+        response.raise_for_status()
+        _log_event("info", "bey_delete_agent_ok", agent_id=agent_id)
+        return True
+    
+    except requests.exceptions.HTTPError as e:
+        # 404 is okay - agent might already be deleted
+        if e.response and e.response.status_code == 404:
+            _log_event("info", "bey_delete_agent_not_found", agent_id=agent_id)
+            return True
+        _log_event("error", "bey_delete_agent_failed",
+                   agent_id=agent_id,
+                   status_code=e.response.status_code if e.response else None,
+                   error=str(e))
+        return False
+    except Exception as e:
+        _log_event("error", "bey_delete_agent_error", agent_id=agent_id, error=str(e))
+        return False
+
+
+def get_agent(agent_id: str) -> Optional[Dict[str, Any]]:
+    """Get agent details.
+    
+    GET /v1/agent/{id}
+    """
+    try:
+        response = requests.get(
+            f"{BEY_API_URL}/agent/{agent_id}",
+            headers=_get_headers(),
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        _log_event("error", "bey_get_agent_error", agent_id=agent_id, error=str(e))
+        return None
+
+
+# ============================================================
+# CALL OPERATIONS
+# ============================================================
+
+def create_call(
+    agent_id: str,
+    username: str = "User",
+    tags: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Create a new call session.
+    
+    POST /v1/calls
+    
+    Returns call object with livekit_url and livekit_token.
+    """
+    try:
+        payload = {
+            "agent_id": agent_id,
+            "livekit_username": username,
+        }
+        if tags:
+            payload["tags"] = tags
+        
+        response = requests.post(
+            f"{BEY_API_URL}/calls",
+            headers=_get_headers(),
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        _log_event("info", "bey_create_call_ok",
+                   call_id=data.get("id"),
+                   agent_id=agent_id)
+        return data
+    
+    except requests.exceptions.HTTPError as e:
+        _log_event("error", "bey_create_call_failed",
+                   agent_id=agent_id,
+                   status_code=e.response.status_code if e.response else None,
+                   response_text=e.response.text if e.response else None,
+                   error=str(e))
+        return None
+    except Exception as e:
+        _log_event("error", "bey_create_call_error", agent_id=agent_id, error=str(e))
+        return None
 
 
 def fetch_call(call_id: str) -> Optional[Dict[str, Any]]:
     """Fetch call details from Beyond Presence API.
     
     GET /v1/calls/{id}
-    
-    Returns call object with:
-    - id: string
-    - agent_id: string
-    - started_at: string (ISO 8601)
-    - ended_at: string | null
-    - tags: object
     """
     try:
         response = requests.get(
@@ -64,11 +206,6 @@ def fetch_messages(call_id: str) -> List[Dict[str, Any]]:
     """Fetch messages for a call from Beyond Presence API.
     
     GET /v1/calls/{id}/messages
-    
-    Returns list of message objects:
-    - message: string
-    - sent_at: string (ISO 8601)
-    - sender: 'ai' | 'user'
     """
     try:
         response = requests.get(
@@ -122,7 +259,7 @@ def build_webhook_payload(call_id: str) -> Optional[Dict[str, Any]]:
             "messages_count": str(len(messages)),
         },
         "messages": messages,
-        "source": "manual_ingest",  # Mark as manual ingest
+        "source": "manual_ingest",
     }
     
     # Calculate duration if we have timestamps
