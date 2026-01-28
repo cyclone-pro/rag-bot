@@ -85,6 +85,13 @@ def _get_embedder() -> SentenceTransformer:
     global _EMBEDDER
     if _EMBEDDER is None:
         _log_event("info", "loading_embedding_model", model=EMBEDDING_MODEL, device=EMBEDDING_DEVICE)
+        
+        # Set HuggingFace token if available (avoids rate limiting)
+        hf_token = os.getenv("HF_TOKEN")
+        if hf_token:
+            os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+            os.environ["HF_HUB_TOKEN"] = hf_token
+        
         _EMBEDDER = SentenceTransformer(EMBEDDING_MODEL, device=EMBEDDING_DEVICE)
     return _EMBEDDER
 
@@ -295,12 +302,7 @@ def _prepare_posting(role: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
 # ---------------------------
 
 def generate_embedding(text: str) -> List[float]:
-    """Generate embedding for a single text using e5-base-v2.
-    
-    The text is prefixed with 'passage: ' as required by e5 models.
-    Returns a normalized embedding vector.
-    """
-    _log_event("info", "embedding_generate_start", text_len=len(text))
+    """Generate embedding for a single text using e5-base-v2."""
     embedder = _get_embedder()
     input_text = f"passage: {text}"
     vector = embedder.encode(input_text, normalize_embeddings=True)
@@ -311,11 +313,7 @@ def generate_embedding(text: str) -> List[float]:
 
 
 def generate_embeddings(texts: List[str]) -> List[List[float]]:
-    """Generate embeddings for multiple texts.
-    
-    Each text is prefixed with 'passage: ' as required by e5 models.
-    Returns a list of normalized embedding vectors.
-    """
+    """Generate embeddings for multiple texts."""
     if not texts:
         return []
     
@@ -339,17 +337,7 @@ def search_similar_jobs(
     threshold: float = SIMILARITY_THRESHOLD,
     top_k: int = MAX_SIMILAR_JOBS,
 ) -> List[Dict[str, Any]]:
-    """Search Milvus for jobs similar to the given embedding.
-    
-    Args:
-        embedding: The embedding vector to search with
-        threshold: Minimum similarity score (0-1, default 0.93)
-        top_k: Maximum number of results to return (default 3)
-    
-    Returns:
-        List of dicts with keys: job_id, score
-        Sorted by score descending, only includes results above threshold.
-    """
+    """Search Milvus for jobs similar to the given embedding."""
     _log_event("info", "milvus_similarity_search_start", top_k=top_k, threshold=threshold)
     if not MILVUS_URI and not MILVUS_HOST:
         _log_event("warning", "milvus_not_configured_for_similarity_search")
@@ -362,9 +350,8 @@ def search_similar_jobs(
     try:
         collection = _get_collection()
         
-        # Search with top_k * 2 to have buffer for filtering
         search_params = {
-            "metric_type": "IP",  # Inner product for normalized vectors = cosine similarity
+            "metric_type": "IP",
             "params": {"nprobe": 10},
         }
         
@@ -387,17 +374,10 @@ def search_similar_jobs(
                         "score": round(score, 4),
                     })
         
-        # Sort by score descending and limit to top_k
         similar_jobs.sort(key=lambda x: x["score"], reverse=True)
         similar_jobs = similar_jobs[:top_k]
         
-        _log_event(
-            "info",
-            "milvus_similarity_search_complete",
-            threshold=threshold,
-            results_found=len(similar_jobs),
-        )
-        
+        _log_event("info", "milvus_similarity_search_complete", threshold=threshold, results_found=len(similar_jobs))
         return similar_jobs
         
     except Exception as exc:
@@ -414,77 +394,59 @@ def insert_job_posting(
     *,
     embedding: Optional[List[float]] = None,
 ) -> bool:
-    """Insert a single job posting to Milvus.
+    """Insert a single job posting to Milvus."""
+    print(f"[INSERT] insert_job_posting called")
     
-    Args:
-        role: The job role data (must include job_id)
-        embedding: Pre-computed embedding. If None, will be generated.
-    
-    Returns:
-        True if inserted successfully, False otherwise.
-    """
     if not MILVUS_URI and not MILVUS_HOST:
+        print("[INSERT] ERROR: Milvus not configured")
         raise RuntimeError("MILVUS_URI or MILVUS_HOST is not configured")
 
     if not isinstance(role, dict):
+        print("[INSERT] ERROR: role is not a dict")
         _log_event("warning", "milvus_insert_skipped_not_dict")
         return False
 
     job_id_raw = role.get("job_id")
-    _log_event("info", "milvus_insert_preparing", job_id=job_id_raw)
-
+    print(f"[INSERT] job_id from role: {job_id_raw}")
+    
     posting, jd_text = _prepare_posting(role)
+    print(f"[INSERT] prepared posting job_id: {posting.get('job_id')}")
     
     if not posting.get("job_id"):
-        _log_event(
-            "warning",
-            "milvus_insert_skipped_no_job_id",
-            role_keys=list(role.keys())[:15],
-        )
+        print(f"[INSERT] ERROR: No job_id after prepare. Keys: {list(role.keys())[:15]}")
+        _log_event("warning", "milvus_insert_skipped_no_job_id", role_keys=list(role.keys())[:15])
         return False
 
     # Use pre-computed embedding or generate new one
     if embedding is None:
-        _log_event(
-            "info",
-            "milvus_generating_embedding",
-            job_id=posting.get("job_id"),
-            text_len=len(jd_text),
-        )
+        print(f"[INSERT] Generating embedding for {posting.get('job_id')}...")
         embedding = generate_embedding(jd_text)
+        print(f"[INSERT] Embedding generated, dim={len(embedding)}")
     
     if len(embedding) != EMBEDDING_DIM:
-        _log_event(
-            "error",
-            "embedding_dimension_mismatch",
-            expected=EMBEDDING_DIM,
-            got=len(embedding),
-            job_id=posting.get("job_id"),
-        )
+        print(f"[INSERT] ERROR: Embedding dim mismatch {len(embedding)} != {EMBEDDING_DIM}")
+        _log_event("error", "embedding_dimension_mismatch", expected=EMBEDDING_DIM, got=len(embedding), job_id=posting.get("job_id"))
         return False
 
     posting["jd_embedding"] = embedding
 
     try:
-        _log_event("info", "milvus_insert_connecting", job_id=posting.get("job_id"))
+        print(f"[INSERT] Getting Milvus collection...")
         collection = _get_collection()
         
         if _company_is_array(collection):
             company_value = posting.get("company") or "Unknown"
             posting["company"] = [company_value]
         
-        _log_event(
-            "info",
-            "milvus_insert_executing",
-            job_id=posting.get("job_id"),
-            posting_keys=list(posting.keys()),
-        )
+        print(f"[INSERT] Inserting to Milvus...")
         collection.insert([posting])
         
+        print(f"[INSERT] SUCCESS: {posting.get('job_id')}")
         _log_event("info", "milvus_insert_single_ok", job_id=posting.get("job_id"))
         return True
         
     except Exception as exc:
+        print(f"[INSERT] EXCEPTION: {exc}")
         _log_event("error", "milvus_insert_single_failed", job_id=posting.get("job_id"), error=str(exc))
         return False
 
@@ -494,15 +456,7 @@ def insert_job_postings(
     *,
     embeddings: Optional[List[List[float]]] = None,
 ) -> int:
-    """Insert multiple job postings to Milvus.
-    
-    Args:
-        roles: List of job role data (each must include job_id)
-        embeddings: Pre-computed embeddings matching roles order. If None, will be generated.
-    
-    Returns:
-        Number of successfully inserted postings.
-    """
+    """Insert multiple job postings to Milvus."""
     if not MILVUS_URI and not MILVUS_HOST:
         raise RuntimeError("MILVUS_URI or MILVUS_HOST is not configured")
 
@@ -523,24 +477,7 @@ def insert_job_postings(
     if not postings:
         return 0
 
-    sample_jobs = [
-        {"job_id": posting.get("job_id"), "title": posting.get("title")}
-        for posting in postings[:10]
-    ]
-    _log_event(
-        "info",
-        "milvus_insert_batch_start",
-        count=len(postings),
-        sample_jobs=sample_jobs,
-        sample_truncated=len(postings) > 10,
-    )
-    _log_event(
-        "info",
-        "milvus_insert_start",
-        count=len(postings),
-        sample_jobs=sample_jobs,
-        sample_truncated=len(postings) > 10,
-    )
+    _log_event("info", "milvus_insert_batch_start", count=len(postings))
 
     # Use pre-computed embeddings or generate new ones
     if embeddings is not None and len(embeddings) == len(postings):
@@ -563,32 +500,35 @@ def insert_job_postings(
         
         collection.insert(postings)
         _log_event("info", "milvus_insert_batch_ok", count=len(postings))
-        _log_event("info", "milvus_insert_ok", count=len(postings))
         return len(postings)
         
     except Exception as exc:
         _log_event("error", "milvus_insert_batch_failed", error=str(exc))
-        _log_event("error", "milvus_insert_failed", error=str(exc))
         raise
 
 
 def sync_jobs_to_milvus(jobs: List[Dict[str, Any]]) -> Tuple[int, int]:
     """Sync multiple jobs to Milvus. Returns (success_count, fail_count)."""
     success, fail = 0, 0
+    print(f"[SYNC] sync_jobs_to_milvus called with {len(jobs)} jobs")
     _log_event("info", "milvus_sync_start", total=len(jobs))
-    for job in jobs:
+    
+    for i, job in enumerate(jobs):
         job_id = job.get("job_id", "unknown")
+        print(f"[SYNC] Processing job {i+1}/{len(jobs)}: {job_id}")
         try:
-            _log_event("info", "milvus_sync_item_start", job_id=job_id)
-            if insert_job_posting(job):
+            result = insert_job_posting(job)
+            print(f"[SYNC] insert_job_posting returned: {result}")
+            if result:
                 success += 1
-                _log_event("info", "milvus_sync_item_ok", job_id=job_id)
             else:
                 fail += 1
-                _log_event("warning", "milvus_sync_item_returned_false", job_id=job_id)
         except Exception as exc:
+            print(f"[SYNC] Exception for {job_id}: {exc}")
             _log_event("error", "milvus_sync_item_failed", job_id=job_id, error=str(exc))
             fail += 1
+    
+    print(f"[SYNC] Complete: success={success}, fail={fail}")
     _log_event("info", "milvus_sync_complete", success=success, fail=fail)
     return success, fail
 
