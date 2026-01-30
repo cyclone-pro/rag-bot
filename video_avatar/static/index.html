@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Recruiter.AI - AI Intake Assistant</title>
+  <title>Recruiter.AI - AI Job Intake</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -13,10 +13,9 @@
       --bg-card: #111827;
       --accent-blue: #3b82f6;
       --accent-cyan: #22d3ee;
-      --text-primary: #f9fafb;
-      --text-secondary: #9ca3af;
-      --border: #1f2937;
-      --glow: rgba(59, 130, 246, 0.5);
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --border-color: #1e293b;
     }
 
     * {
@@ -33,288 +32,351 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
-      padding: 2rem;
+      padding: 40px 20px;
     }
 
-    .container {
-      max-width: 480px;
-      text-align: center;
+    /* Logo */
+    .logo-container {
+      margin-bottom: 20px;
     }
 
     .logo {
       width: 80px;
       height: 80px;
-      margin-bottom: 1.5rem;
-      filter: drop-shadow(0 0 20px var(--glow));
+      border-radius: 20px;
+      filter: drop-shadow(0 0 20px rgba(59, 130, 246, 0.3));
     }
 
+    /* Header */
     h1 {
-      font-size: 2rem;
+      font-size: 2.5rem;
       font-weight: 700;
-      margin-bottom: 0.5rem;
       background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
+      margin-bottom: 8px;
     }
 
     .subtitle {
       color: var(--text-secondary);
-      margin-bottom: 3rem;
       font-size: 1.1rem;
+      margin-bottom: 50px;
     }
 
-    .avatar-container {
-      position: relative;
-      display: inline-block;
-      margin-bottom: 2rem;
+    /* Avatar Selection */
+    .avatar-section {
+      text-align: center;
+      margin-bottom: 40px;
     }
 
-    .avatar-btn {
-      width: 160px;
-      height: 160px;
-      border-radius: 50%;
-      border: none;
-      background: linear-gradient(135deg, #1e3a5f, #0f172a);
-      cursor: pointer;
-      position: relative;
-      box-shadow: 
-        0 0 40px rgba(59, 130, 246, 0.3),
-        inset 0 0 30px rgba(59, 130, 246, 0.1);
-      transition: transform 0.3s ease, box-shadow 0.3s ease;
-      overflow: hidden;
+    .avatar-section h2 {
+      font-size: 1.3rem;
+      font-weight: 600;
+      margin-bottom: 30px;
+      color: var(--text-primary);
     }
 
-    .avatar-btn:hover {
-      transform: scale(1.05);
-      box-shadow: 
-        0 0 60px rgba(59, 130, 246, 0.5),
-        inset 0 0 40px rgba(59, 130, 246, 0.2);
+    .avatar-grid {
+      display: flex;
+      gap: 30px;
+      justify-content: center;
+      flex-wrap: wrap;
     }
 
-    .avatar-btn:active {
-      transform: scale(0.98);
-    }
-
-    .avatar-btn img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      border-radius: 50%;
-    }
-
-    .avatar-btn::before {
-      content: '';
-      position: absolute;
-      inset: -4px;
-      border-radius: 50%;
-      border: 2px solid transparent;
-      background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan)) border-box;
-      -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
-      -webkit-mask-composite: xor;
-      mask-composite: exclude;
-      animation: rotate 3s linear infinite;
-    }
-
-    @keyframes rotate {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
-    }
-
-    .pulse-ring {
-      position: absolute;
-      inset: -20px;
-      border-radius: 50%;
-      border: 2px solid var(--accent-blue);
-      opacity: 0;
-      animation: pulse 2s ease-out infinite;
-    }
-
-    .pulse-ring:nth-child(2) {
-      animation-delay: 0.5s;
-    }
-
-    @keyframes pulse {
-      0% {
-        transform: scale(0.8);
-        opacity: 0.8;
-      }
-      100% {
-        transform: scale(1.3);
-        opacity: 0;
-      }
-    }
-
-    .cta-text {
-      font-size: 1.1rem;
-      color: var(--text-secondary);
-      margin-bottom: 1rem;
-    }
-
-    .status {
-      font-size: 0.9rem;
-      color: var(--text-secondary);
-      padding: 0.75rem 1.5rem;
+    .avatar-card {
       background: var(--bg-card);
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      margin-top: 1rem;
-      display: none;
-    }
-
-    .status.visible {
-      display: block;
-    }
-
-    .status.error {
-      border-color: #ef4444;
-      color: #fca5a5;
-    }
-
-    .status.loading {
-      border-color: var(--accent-blue);
-      color: var(--accent-cyan);
-    }
-
-    .features {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 1rem;
-      margin-top: 3rem;
+      border: 2px solid var(--border-color);
+      border-radius: 20px;
+      padding: 20px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      width: 180px;
       text-align: center;
     }
 
-    .feature {
-      padding: 1rem;
+    .avatar-card:hover {
+      border-color: var(--accent-blue);
+      transform: translateY(-5px);
+      box-shadow: 0 10px 40px rgba(59, 130, 246, 0.2);
     }
 
-    .feature-icon {
-      font-size: 1.5rem;
-      margin-bottom: 0.5rem;
+    .avatar-card.selected {
+      border-color: var(--accent-cyan);
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(34, 211, 238, 0.1));
+      box-shadow: 0 0 30px rgba(34, 211, 238, 0.3);
     }
 
-    .feature-text {
+    .avatar-image {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      object-fit: cover;
+      margin-bottom: 15px;
+      border: 3px solid var(--border-color);
+      transition: border-color 0.3s ease;
+    }
+
+    .avatar-card:hover .avatar-image,
+    .avatar-card.selected .avatar-image {
+      border-color: var(--accent-cyan);
+    }
+
+    .avatar-name {
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 5px;
+    }
+
+    .avatar-role {
       font-size: 0.85rem;
       color: var(--text-secondary);
     }
 
-    @media (max-width: 480px) {
-      .features {
-        grid-template-columns: 1fr;
+    /* Start Button */
+    .start-section {
+      text-align: center;
+      margin-bottom: 50px;
+    }
+
+    .start-btn {
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+      border: none;
+      color: white;
+      font-size: 1.1rem;
+      font-weight: 600;
+      padding: 16px 50px;
+      border-radius: 50px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .start-btn:hover {
+      transform: scale(1.05);
+      box-shadow: 0 10px 40px rgba(59, 130, 246, 0.4);
+    }
+
+    .start-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .start-btn svg {
+      width: 24px;
+      height: 24px;
+    }
+
+    /* Status */
+    #status {
+      margin-top: 15px;
+      font-size: 0.95rem;
+      min-height: 24px;
+    }
+
+    .status-loading {
+      color: var(--accent-cyan);
+    }
+
+    .status-error {
+      color: #f87171;
+    }
+
+    /* Features */
+    .features {
+      display: flex;
+      gap: 40px;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: 800px;
+    }
+
+    .feature {
+      text-align: center;
+      width: 200px;
+    }
+
+    .feature-icon {
+      font-size: 2rem;
+      margin-bottom: 10px;
+    }
+
+    .feature h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 5px;
+    }
+
+    .feature p {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      h1 {
+        font-size: 1.8rem;
+      }
+      
+      .avatar-grid {
+        gap: 15px;
+      }
+      
+      .avatar-card {
+        width: 150px;
+        padding: 15px;
+      }
+      
+      .avatar-image {
+        width: 90px;
+        height: 90px;
       }
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <img src="/static/logo.png" alt="Recruiter.AI" class="logo" onerror="this.style.display='none'">
-    <h1>Recruiter.AI</h1>
-    <p class="subtitle">AI-Powered Job Intake Assistant</p>
+  <div class="logo-container">
+    <img src="/static/logo.png" alt="Recruiter.AI" class="logo">
+  </div>
 
-    <div class="avatar-container">
-      <div class="pulse-ring"></div>
-      <div class="pulse-ring"></div>
-      <button class="avatar-btn" id="start-btn" aria-label="Start conversation with Ava">
-        <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="50" cy="50" r="48" fill="url(#grad)" stroke="#3b82f6" stroke-width="2"/>
-          <circle cx="50" cy="38" r="16" fill="#22d3ee"/>
-          <path d="M20 85c0-20 13-32 30-32s30 12 30 32" fill="#22d3ee"/>
-          <defs>
-            <linearGradient id="grad" x1="0" y1="0" x2="100" y2="100">
-              <stop offset="0%" stop-color="#1e3a5f"/>
-              <stop offset="100%" stop-color="#0f172a"/>
-            </linearGradient>
-          </defs>
-        </svg>
-      </button>
-    </div>
+  <h1>Recruiter.AI</h1>
+  <p class="subtitle">AI-Powered Job Intake Assistant</p>
 
-    <p class="cta-text">Click to start a conversation with Ava</p>
-
-    <div class="status" id="status"></div>
-
-    <div class="features">
-      <div class="feature">
-        <div class="feature-icon">🎯</div>
-        <div class="feature-text">Smart Intake</div>
+  <div class="avatar-section">
+    <h2>Choose Your AI Recruiter</h2>
+    <div class="avatar-grid">
+      <div class="avatar-card" data-avatar="scott" onclick="selectAvatar('scott')">
+        <img src="/static/Scott.png" alt="Scott" class="avatar-image">
+        <div class="avatar-name">Scott</div>
+        <div class="avatar-role">AI Recruiter</div>
       </div>
-      <div class="feature">
-        <div class="feature-icon">⚡</div>
-        <div class="feature-text">Instant Processing</div>
+      <div class="avatar-card" data-avatar="sam" onclick="selectAvatar('sam')">
+        <img src="/static/Sam.png" alt="Sam" class="avatar-image">
+        <div class="avatar-name">Sam</div>
+        <div class="avatar-role">AI Recruiter</div>
       </div>
-      <div class="feature">
-        <div class="feature-icon">🔍</div>
-        <div class="feature-text">Auto-Matching</div>
+      <div class="avatar-card" data-avatar="ava" onclick="selectAvatar('ava')">
+        <img src="/static/Ava.png" alt="Ava" class="avatar-image">
+        <div class="avatar-name">Zara</div>
+        <div class="avatar-role">AI Recruiter</div>
       </div>
     </div>
   </div>
 
+  <div class="start-section">
+    <button class="start-btn" id="start-btn" onclick="startCall()">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+      </svg>
+      Start Conversation
+    </button>
+    <div id="status"></div>
+  </div>
+
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon">🎯</div>
+      <h3>Smart Intake</h3>
+      <p>AI extracts job requirements through natural conversation</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">⚡</div>
+      <h3>Instant Processing</h3>
+      <p>Requirements saved to database in real-time</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🔍</div>
+      <h3>Auto-Matching</h3>
+      <p>Semantic search finds similar candidates instantly</p>
+    </div>
+  </div>
+
   <script>
-    const startBtn = document.getElementById('start-btn');
-    const statusEl = document.getElementById('status');
+    let selectedAvatar = localStorage.getItem('selectedAvatar') || 'scott';
     let isLoading = false;
 
-    function setStatus(message, type = '') {
-      statusEl.textContent = message;
-      statusEl.className = 'status visible ' + type;
+    // Initialize
+    document.addEventListener('DOMContentLoaded', () => {
+      selectAvatar(selectedAvatar, false);
+    });
+
+    function selectAvatar(avatar, save = true) {
+      selectedAvatar = avatar;
+      if (save) {
+        localStorage.setItem('selectedAvatar', avatar);
+      }
+
+      // Update UI
+      document.querySelectorAll('.avatar-card').forEach(card => {
+        card.classList.remove('selected');
+      });
+      document.querySelector(`[data-avatar="${avatar}"]`).classList.add('selected');
+    }
+
+    function setStatus(message, type) {
+      const status = document.getElementById('status');
+      status.textContent = message;
+      status.className = type === 'error' ? 'status-error' : 'status-loading';
     }
 
     function clearStatus() {
-      statusEl.className = 'status';
+      document.getElementById('status').textContent = '';
     }
 
-    async function createCall() {
+    async function startCall() {
       if (isLoading) return;
       isLoading = true;
-      startBtn.style.pointerEvents = 'none';
 
-      setStatus('Connecting to Ava...', 'loading');
+      const btn = document.getElementById('start-btn');
+      btn.disabled = true;
+      setStatus('Connecting to ' + selectedAvatar.charAt(0).toUpperCase() + selectedAvatar.slice(1) + '...', 'loading');
 
       try {
         const response = await fetch('/api/create-call', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: 'Vendor' })
+          body: JSON.stringify({ 
+            username: 'Vendor',
+            avatar: selectedAvatar
+          })
         });
 
         const data = await response.json();
 
         if (data.status === 'ok' && data.livekit_url && data.livekit_token) {
-          // Store credentials and open call page
           const params = new URLSearchParams({
             call_id: data.call_id,
             livekit_url: data.livekit_url,
-            livekit_token: data.livekit_token
+            livekit_token: data.livekit_token,
+            avatar: selectedAvatar
           });
-          
+
           clearStatus();
-          
-          // Try window.open first, fall back to navigation
+
+          // Try to open new tab, fall back to navigation
           const callUrl = '/call?' + params.toString();
           const newWindow = window.open(callUrl, '_blank');
-          
-          // If popup was blocked, navigate in same tab
+
           if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
             setStatus('Opening call page...', 'loading');
             window.location.href = callUrl;
           }
-        } else if (data.retry) {
-          setStatus(data.message || 'Connection failed. Please try again.', 'error');
         } else {
-          setStatus(data.message || 'Something went wrong.', 'error');
+          setStatus(data.message || 'Connection failed. Please try again.', 'error');
         }
       } catch (error) {
         console.error('Error:', error);
         setStatus('Network error. Please check your connection.', 'error');
       } finally {
         isLoading = false;
-        startBtn.style.pointerEvents = 'auto';
+        btn.disabled = false;
         setTimeout(clearStatus, 5000);
       }
     }
-
-    startBtn.addEventListener('click', createCall);
   </script>
 </body>
 </html>

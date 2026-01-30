@@ -38,12 +38,12 @@ EMPLOYMENT_TYPE_ENUM = {"C2C", "W2", "1099", "unspecified"}
 WORK_AUTH_ENUM = {"USC", "GC", "H1B", "H4-EAD", "L1", "L2-EAD", "TN", "E3", "F1-OPT", "F1-CPT", "STEM-OPT", "J1", "O1", "EAD", "Asylum-EAD", "GC-EAD", "Any", "unsp"}
 LOG_LEVEL_ENUM = {"debug", "info", "warning", "error"}
 PROCESSING_STAGE_ENUM = {
-    "webhook_received", "transcript_cleaned", "llm_started", "llm_complete", "llm_failed",
+    "webhook_received", "call_classified", "transcript_cleaned", "llm_started", "llm_complete", "llm_failed",
     "validation_complete", "validation_failed", "embedding_started", "embedding_complete", "embedding_failed",
     "similarity_check_started", "similarity_check_complete", "similarity_check_failed",
     "postgres_insert_started", "postgres_insert_complete", "postgres_insert_skipped", "postgres_insert_failed",
     "milvus_insert_started", "milvus_insert_complete", "milvus_insert_skipped", "milvus_insert_failed",
-    "processing_complete", "processing_failed"
+    "processing_complete", "processing_failed", "processing_skipped"
 }
 
 DEFAULTS: Dict[str, Any] = {
@@ -127,12 +127,10 @@ def _db_url_from_env() -> str:
 async def check_db_connection(timeout: float = 5.0) -> Tuple[bool, str]:
     db_url = _db_url_from_env()
     db_info = _db_info_from_url(db_url)
-    _log_event("info", "db_health_check_start", **db_info)
     try:
         async with await AsyncConnection.connect(db_url) as conn:
             async with conn.cursor() as cur:
                 await cur.execute("SELECT 1")
-        _log_event("info", "db_health_check_ok", **db_info)
         return True, "ok"
     except Exception as e:
         _log_event("error", "db_health_failed", error=str(e), **db_info)
@@ -397,14 +395,6 @@ async def insert_call_transcript(payload: Mapping[str, Any]) -> bool:
     
     db_url = _db_url_from_env()
     db_info = _db_info_from_url(db_url)
-    _log_event(
-        "info",
-        "db_insert_call_transcript_start",
-        call_id=call_id,
-        event_type=data.get("event_type"),
-        message_count=data.get("message_count"),
-        **db_info,
-    )
     try:
         async with await AsyncConnection.connect(db_url) as conn:
             async with conn.cursor() as cur:
@@ -448,7 +438,6 @@ async def append_call_message(
     ).format(cols=SQL(", ").join(Identifier(c) for c in cols), vals=SQL(", ").join(SQL(p) for p in ph))
     
     db_url = _db_url_from_env()
-    _log_event("info", "db_append_call_message_start", call_id=call_id, event_type=event_type)
     try:
         async with await AsyncConnection.connect(db_url) as conn:
             async with conn.cursor() as cur:
@@ -515,14 +504,12 @@ async def update_call_transcript(
     vals.append(call_id)
     
     db_url = _db_url_from_env()
-    _log_event("info", "update_call_transcript_start", call_id=call_id, status=status)
     try:
         async with await AsyncConnection.connect(db_url) as conn:
             async with conn.cursor() as cur:
                 await cur.execute(SQL("UPDATE call_transcripts SET {sets} WHERE call_id = %s").format(
                     sets=SQL(", ").join(set_parts)), vals)
             await conn.commit()
-        _log_event("info", "update_call_transcript_ok", call_id=call_id, status=status)
         return True
     except Exception as e:
         _log_event("error", "update_call_transcript_failed", call_id=call_id, error=str(e))
@@ -552,13 +539,6 @@ async def insert_job_requirement(role: Dict[str, Any], call_id: str, role_index:
     )
     
     db_url = _db_url_from_env()
-    _log_event(
-        "info",
-        "db_insert_job_start",
-        call_id=call_id,
-        role_index=role_index,
-        job_title=data.get("job_title"),
-    )
     try:
         async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
             async with conn.cursor() as cur:
@@ -586,7 +566,6 @@ async def insert_job_requirements(
     db_url = _db_url_from_env()
     db_info = _db_info_from_url(db_url)
     results: List[Tuple[str, str]] = []
-    _log_event("info", "db_insert_jobs_start", role_count=len(roles), **db_info)
     
     try:
         async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
@@ -629,7 +608,6 @@ async def insert_job_requirements(
 async def update_job_milvus_status(job_id: str, synced: bool) -> bool:
     """Update milvus_synced status for a job."""
     db_url = _db_url_from_env()
-    _log_event("info", "update_job_milvus_status_start", job_id=job_id, synced=synced)
     try:
         async with await AsyncConnection.connect(db_url) as conn:
             async with conn.cursor() as cur:
@@ -637,7 +615,6 @@ async def update_job_milvus_status(job_id: str, synced: bool) -> bool:
                     "UPDATE job_requirements SET milvus_synced=%s, milvus_synced_at=%s WHERE job_id=%s",
                     (synced, datetime.now(tz=timezone.utc) if synced else None, job_id))
             await conn.commit()
-        _log_event("info", "update_job_milvus_status_ok", job_id=job_id, synced=synced)
         return True
     except Exception as e:
         _log_event("error", "update_job_milvus_status_failed", job_id=job_id, error=str(e))
@@ -652,9 +629,7 @@ async def fetch_unsynced_jobs(limit: int = 100) -> List[Dict[str, Any]]:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT * FROM job_requirements WHERE milvus_synced=FALSE ORDER BY created_at LIMIT %s", (limit,))
-                rows = [dict(r) for r in await cur.fetchall()]
-                _log_event("info", "fetch_unsynced_jobs_ok", count=len(rows), limit=limit)
-                return rows
+                return [dict(r) for r in await cur.fetchall()]
     except Exception as e:
         _log_event("error", "fetch_unsynced_jobs_failed", error=str(e))
         return []
@@ -729,7 +704,8 @@ async def fetch_stats() -> Dict[str, Any]:
     stats = {
         "total_calls": 0, "calls_today": 0, "calls_this_week": 0, "calls_this_month": 0,
         "minutes_used": {"today": 0, "this_week": 0, "this_month": 0, "total": 0},
-        "status_breakdown": {"received": 0, "processing": 0, "parsed": 0, "failed": 0},
+        "status_breakdown": {"received": 0, "processing": 0, "parsed": 0, "failed": 0, 
+                            "skipped": 0, "product_inquiry": 0},
         "jobs_created": {"total": 0, "today": 0, "this_week": 0, "this_month": 0},
         "avg_processing_time_ms": 0, "avg_roles_per_call": 0, "avg_call_duration_minutes": 0,
         "similarity_matches": {"total": 0, "above_95_percent": 0, "above_90_percent": 0},
@@ -750,7 +726,9 @@ async def fetch_stats() -> Dict[str, Any]:
                         COUNT(*) FILTER (WHERE status='received') as s_received,
                         COUNT(*) FILTER (WHERE status='processing') as s_processing,
                         COUNT(*) FILTER (WHERE status='parsed') as s_parsed,
-                        COUNT(*) FILTER (WHERE status='failed' OR status LIKE 'failed_%%') as s_failed
+                        COUNT(*) FILTER (WHERE status='failed' OR status LIKE 'failed_%%') as s_failed,
+                        COUNT(*) FILTER (WHERE status='skipped') as s_skipped,
+                        COUNT(*) FILTER (WHERE status='product_inquiry') as s_product_inquiry
                     FROM call_transcripts WHERE event_type='call_ended'
                 """, (today_start, week_start, month_start))
                 r = await cur.fetchone()
@@ -758,7 +736,8 @@ async def fetch_stats() -> Dict[str, Any]:
                     stats.update({"total_calls": r["total"] or 0, "calls_today": r["today"] or 0,
                                   "calls_this_week": r["this_week"] or 0, "calls_this_month": r["this_month"] or 0,
                                   "status_breakdown": {"received": r["s_received"] or 0, "processing": r["s_processing"] or 0,
-                                                       "parsed": r["s_parsed"] or 0, "failed": r["s_failed"] or 0}})
+                                                       "parsed": r["s_parsed"] or 0, "failed": r["s_failed"] or 0,
+                                                       "skipped": r["s_skipped"] or 0, "product_inquiry": r["s_product_inquiry"] or 0}})
                 
                 # Minutes
                 await cur.execute("""

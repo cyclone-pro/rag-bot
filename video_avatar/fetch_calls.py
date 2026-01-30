@@ -268,15 +268,15 @@ async def _insert_roles(roles: List[Dict[str, Any]], *, call_id: str, call_start
     meta = {
         "phone_call_duration": duration_sec,
         "email_received_at": call_started_at,
-        "source_type": "phone_interview",
-        "created_by": "ava_ai_recruiter",
+        "source_type": "virtual_recruiter",
+        "created_by": "ai_recruiter",
         "source_call_id": call_id,
     }
     return await insert_job_requirements(
         roles,
         metadata=meta,
-        created_by="ava_ai_recruiter",
-        source_type="phone_interview",
+        created_by="ai_recruiter",
+        source_type="virtual_recruiter",
         dedupe_call_id=call_id,
     )
 

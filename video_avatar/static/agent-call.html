@@ -248,9 +248,9 @@
   <div class="loading-screen" id="loading-screen">
     <img src="/static/logo.png" alt="Recruiter.AI" class="loading-logo" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2245%22 fill=%22%231e3a5f%22 stroke=%22%233b82f6%22 stroke-width=%222%22/><path d=%22M30 70L50 30L70 70Z%22 fill=%22%2322d3ee%22/></svg>'">
     <div class="loading-text">
-      Ava is wrapping up another call<span class="loading-dots"><span></span><span></span><span></span></span>
+      <span id="loading-name">Ava</span> is wrapping up another call<span class="loading-dots"><span></span><span></span><span></span></span>
     </div>
-    <div class="loading-subtext">She'll be with you in just a moment</div>
+    <div class="loading-subtext"><span id="loading-name-subtext">Ava</span> will be with you in just a moment</div>
   </div>
 
   <!-- Error Screen -->
@@ -296,6 +296,14 @@
     const params = new URLSearchParams(window.location.search);
     const livekitUrl = params.get('livekit_url');
     const livekitToken = params.get('livekit_token');
+    const avatarKey = params.get('avatar') || 'ava';
+    const avatarName = avatarKey.charAt(0).toUpperCase() + avatarKey.slice(1);
+
+    document.title = `Call with ${avatarName} - Recruiter.AI`;
+    const loadingName = document.getElementById('loading-name');
+    const loadingNameSubtext = document.getElementById('loading-name-subtext');
+    if (loadingName) loadingName.textContent = avatarName;
+    if (loadingNameSubtext) loadingNameSubtext.textContent = avatarName;
     const callId = params.get('call_id');
 
     let room = null;

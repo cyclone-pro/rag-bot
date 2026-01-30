@@ -25,7 +25,7 @@ from milvus_job_postings import (
     insert_job_posting, _build_jd_text, sync_jobs_to_milvus,
 )
 from bey_client import build_webhook_payload, create_agent, create_call, delete_agent
-from agent_prompt import build_agent_config
+from agent_prompt import build_agent_config, get_avatar_config
 from gcs_client import (
     get_call_history, add_call_to_history, update_call_status,
     mark_call_started, get_recent_job_summaries,
@@ -57,6 +57,26 @@ def _openai_client() -> AsyncOpenAI:
 
 SYSTEM_PROMPT = '''You extract structured job requirements from recruitment call transcripts.
 CRITICAL: Return ONLY valid JSON. No markdown, no commentary.
+
+INTELLIGENT EXTRACTION RULES:
+1. Extract information from what the USER said, not just what the agent summarized
+2. If the agent summarizes at the end, use that as validation but prefer user's original words
+3. Infer seniority from context: 5+ years = Senior, 2-4 years = Mid, 0-2 years = Entry
+4. Be smart about technology stacks - if they mention "Java with Spring Boot", capture both
+5. Understand recruiting terminology:
+   - "C2C" = employment_type: C2C (corp-to-corp)
+   - "W2" = employment_type: W2
+   - "1099" = employment_type: 1099
+   - "C2H" or "CTH" or "contract to hire" = job_type: Contract-to-hire (NOT employment_type)
+   - "perm" or "permanent" or "FTE" = job_type: Full-time
+6. Work authorization shortcuts:
+   - "GC" or "green card" = GC
+   - "citizens only" or "USC only" = USC
+   - "no H1B" = put H1B in not_allowed_work_auth
+   - "any visa" or "open to all" = Any
+7. If user mentions specific technologies, add them to must_have_skills even if not explicitly labeled "required"
+8. Capture interview details: rounds, duration, format (video/phone/onsite)
+9. For pay rates: always extract the number, e.g., "seventy dollars" = 70, "fifty bucks an hour" = 50
 
 OUTPUT SCHEMA:
 {
@@ -157,7 +177,7 @@ OUTPUT SCHEMA:
   "parse_warnings": ["array of any parsing issues"]
 }
 
-RULES:
+FINAL RULES:
 1. job_title is REQUIRED - infer from context if not stated, use "Unknown role" as last resort
 2. For pay rates: if single value like "$60/hr", set BOTH pay_rate_min and pay_rate_max to 60
 3. For salary: if "100k to 130k", set salary_min=100000, salary_max=130000
@@ -166,15 +186,80 @@ RULES:
 6. Do NOT invent data - use null for unknown fields
 7. If multiple roles discussed, create separate role objects
 8. location_cities and location_states arrays MUST have same length
-9. IMPORTANT: "C2H" or "CTH" means Contract-to-Hire (job_type), NOT C2C (employment_type). 
-   - job_type: Contract-to-hire means the position starts as contract and converts to full-time
-   - employment_type: C2C/W2/1099 refers to HOW the contractor is paid (corp-to-corp, W2 employee, independent contractor)
-   - If employment_type is not explicitly mentioned (W2, C2C, 1099), use "unspecified"
+9. IMPORTANT: "C2H" or "CTH" means Contract-to-Hire (job_type), NOT C2C (employment_type)
+10. If the transcript contains only the agent's greeting with no user response, still extract what info is available from the greeting (it may reference a previous role)
 '''
 
 FILLER_RE = re.compile(r"(?i)\b(?:um+|uh+|ah+|er+|hmm+|okay|alright|yeah|yep|so|like)\b(?=\s*[.,!?]|\s*$)")
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_RE = re.compile(r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b")
+
+# Keywords for call classification
+JOB_KEYWORDS = re.compile(
+    r"(?i)\b(developer|engineer|architect|analyst|manager|admin|consultant|"
+    r"contract|c2c|w2|1099|remote|onsite|hybrid|salary|rate|hour|"
+    r"java|python|\.net|react|angular|aws|azure|devops|"
+    r"position|role|job|hire|candidate|resume|interview|"
+    r"requirement|skills|experience|years|senior|junior|mid)"
+)
+
+PRODUCT_KEYWORDS = re.compile(
+    r"(?i)\b(what can you do|what do you do|how do you work|"
+    r"what is rcrutr|tell me about|explain|demo|features|"
+    r"how does it work|capabilities|pricing|cost|"
+    r"replace recruiters|compliant|compliance|industries|"
+    r"ats|applicant tracking|different from|compared to)"
+)
+
+
+def _classify_call(messages: List[Dict], duration_seconds: float = 0) -> str:
+    """
+    Classify the call type to determine processing strategy.
+    
+    Returns:
+        'job_intake' - Contains job requirements, process normally
+        'product_inquiry' - User asking about the product, skip job extraction
+        'incomplete' - Too short/empty to process
+        'mixed' - Both product questions and job intake
+    """
+    if not messages:
+        return "incomplete"
+    
+    # Count user messages only
+    user_messages = [m for m in messages if m.get("sender", "").lower() in ("user", "human")]
+    
+    # Too few user messages = incomplete
+    if len(user_messages) < 2:
+        return "incomplete"
+    
+    # Combine all user text for analysis
+    user_text = " ".join(
+        m.get("message") or m.get("content") or m.get("text", "")
+        for m in user_messages
+    )
+    
+    # Count keyword matches
+    job_matches = len(JOB_KEYWORDS.findall(user_text))
+    product_matches = len(PRODUCT_KEYWORDS.findall(user_text))
+    
+    # Classification logic
+    if job_matches == 0 and product_matches == 0:
+        # No clear signals - check message count
+        if len(user_messages) < 3:
+            return "incomplete"
+        return "job_intake"  # Default to job intake for longer conversations
+    
+    if product_matches > 0 and job_matches == 0:
+        return "product_inquiry"
+    
+    if job_matches > 0 and product_matches == 0:
+        return "job_intake"
+    
+    # Both present
+    if job_matches >= product_matches:
+        return "mixed"  # Process as job intake but note the mixed nature
+    else:
+        return "product_inquiry"
 
 def _clean_transcript(messages: List[Dict]) -> str:
     lines = []
@@ -247,6 +332,58 @@ async def _process_call(call_id: str, payload: Dict) -> None:
     if not messages:
         transcript = await fetch_call_transcript(call_id)
         messages = transcript.get("messages", []) if transcript else []
+    
+    # Calculate call duration
+    call_data = payload.get("call_data", {})
+    duration_seconds = 0
+    try:
+        if call_data.get("startedAt") and call_data.get("endedAt"):
+            from datetime import datetime
+            start_dt = datetime.fromisoformat(call_data["startedAt"].replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(call_data["endedAt"].replace("Z", "+00:00"))
+            duration_seconds = (end_dt - start_dt).total_seconds()
+    except:
+        pass
+    
+    # Classify the call BEFORE expensive processing
+    call_type = _classify_call(messages, duration_seconds)
+    await _log_proc(call_id, "call_classified", message=f"Call type: {call_type}",
+                    metadata={"call_type": call_type, "duration_seconds": duration_seconds,
+                              "message_count": len(messages)})
+    
+    # Handle non-job-intake calls
+    if call_type == "incomplete":
+        await _log_proc(call_id, "processing_skipped", message="Call too short or incomplete")
+        await update_call_transcript(call_id, status="skipped", 
+                                     error_message="Call incomplete - insufficient data")
+        # Still update GCS to mark call as processed
+        try:
+            agent_id = call_data.get("agentId") or payload.get("tags", {}).get("agent_id")
+            await asyncio.to_thread(update_call_status, call_id, "incomplete", {})
+            if agent_id and payload.get("tags", {}).get("disposable") == "true":
+                await asyncio.to_thread(delete_agent, agent_id)
+        except:
+            pass
+        return
+    
+    if call_type == "product_inquiry":
+        await _log_proc(call_id, "processing_skipped", message="Product inquiry - no job extraction needed")
+        await update_call_transcript(call_id, status="product_inquiry",
+                                     error_message="Product inquiry call - no jobs to extract")
+        # Update GCS and cleanup
+        try:
+            agent_id = call_data.get("agentId") or payload.get("tags", {}).get("agent_id")
+            await asyncio.to_thread(update_call_status, call_id, "product_inquiry", {})
+            if agent_id and payload.get("tags", {}).get("disposable") == "true":
+                await asyncio.to_thread(delete_agent, agent_id)
+        except:
+            pass
+        await _log_proc(call_id, "processing_complete", message="Product inquiry logged",
+                       metadata={"call_type": "product_inquiry"},
+                       duration_ms=int((time.time()-start)*1000))
+        return
+    
+    # Continue with job extraction for 'job_intake' and 'mixed' types
     
     # Clean transcript
     t0 = time.time()
@@ -399,6 +536,20 @@ async def _process_call(call_id: str, payload: Dict) -> None:
                 _log("info", "disposable_agent_deleted", agent_id=agent_id)
         except Exception as e:
             _log("warning", "gcs_update_failed", call_id=call_id, error=str(e))
+    
+    # Auto-sync to Milvus
+    try:
+        for job_id in inserted:
+            job_data = next((r for r in roles if r.get("job_id") == job_id), None)
+            if job_data:
+                sync_result = await asyncio.to_thread(insert_job_posting, job_data)
+                if sync_result:
+                    await update_job_milvus_status(job_id, True)
+                    _log("info", "auto_milvus_sync_ok", job_id=job_id)
+                else:
+                    _log("warning", "auto_milvus_sync_failed", job_id=job_id)
+    except Exception as e:
+        _log("warning", "auto_milvus_sync_error", call_id=call_id, error=str(e))
     
     await _log_proc(call_id, "processing_complete", message="Done",
                    metadata={"roles_found": len(roles), "jobs_created": len(inserted)},
@@ -650,6 +801,14 @@ async def api_create_call(request: Request):
         body = {}
     
     username = body.get("username", "Vendor")
+    avatar_key = body.get("avatar", "scott").lower()
+    
+    # Get avatar config
+    avatar_config = get_avatar_config(avatar_key)
+    agent_name = avatar_config["name"]
+    avatar_id = avatar_config["id"]
+    
+    _log("info", "create_call_start", username=username, avatar=avatar_key, agent_name=agent_name)
     
     # Step 1: Fetch call history
     try:
@@ -663,7 +822,8 @@ async def api_create_call(request: Request):
     agent_config = build_agent_config(
         call_history=call_history,
         username=username,
-        agent_name=f"Ava - Recruiter ({datetime.now().strftime('%H:%M')})",
+        agent_name=agent_name,
+        avatar_id=avatar_id,
     )
     
     # Step 3: Create agent (with retry)

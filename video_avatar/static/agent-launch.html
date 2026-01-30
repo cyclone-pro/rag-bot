@@ -144,6 +144,10 @@
       const hintEl = document.getElementById("hint");
       const avatarBtn = document.getElementById("avatar-btn");
       let callData = null;
+      const selectedAvatar = (localStorage.getItem("selectedAvatar") || "ava").toLowerCase();
+      const selectedAvatarName = selectedAvatar.charAt(0).toUpperCase() + selectedAvatar.slice(1);
+
+      avatarBtn.textContent = selectedAvatarName.charAt(0);
 
       function setStatus(text) {
         statusEl.textContent = text;
@@ -200,6 +204,7 @@
         if (callData.id) {
           url.searchParams.set("call_id", callData.id);
         }
+        url.searchParams.set("avatar", selectedAvatar);
         window.open(url.toString(), "_blank", "noopener");
       }
 
