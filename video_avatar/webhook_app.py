@@ -537,20 +537,6 @@ async def _process_call(call_id: str, payload: Dict) -> None:
         except Exception as e:
             _log("warning", "gcs_update_failed", call_id=call_id, error=str(e))
     
-    # Auto-sync to Milvus
-    try:
-        for job_id in inserted:
-            job_data = next((r for r in roles if r.get("job_id") == job_id), None)
-            if job_data:
-                sync_result = await asyncio.to_thread(insert_job_posting, job_data)
-                if sync_result:
-                    await update_job_milvus_status(job_id, True)
-                    _log("info", "auto_milvus_sync_ok", job_id=job_id)
-                else:
-                    _log("warning", "auto_milvus_sync_failed", job_id=job_id)
-    except Exception as e:
-        _log("warning", "auto_milvus_sync_error", call_id=call_id, error=str(e))
-    
     await _log_proc(call_id, "processing_complete", message="Done",
                    metadata={"roles_found": len(roles), "jobs_created": len(inserted)},
                    duration_ms=int((time.time()-start)*1000))
@@ -595,8 +581,23 @@ async def webhook(request: Request):
         _log("error", "webhook_db_error", call_id=call_id, error=str(e))
         return JSONResponse({"status": "db_error", "error": str(e)}, status_code=500, headers=CORS)
     
-    asyncio.create_task(_process_call(call_id, payload))
+    asyncio.create_task(_safe_process_call(call_id, payload))
     return JSONResponse({"status": "accepted", "call_id": call_id}, headers=CORS)
+
+
+async def _safe_process_call(call_id: str, payload: Dict) -> None:
+    """Wrapper for _process_call with exception logging."""
+    try:
+        await _process_call(call_id, payload)
+    except Exception as e:
+        import traceback
+        error_msg = f"Background processing failed: {str(e)}"
+        error_trace = traceback.format_exc()
+        _log("error", "process_call_exception", call_id=call_id, error=error_msg, traceback=error_trace)
+        try:
+            await update_call_transcript(call_id, status="failed", error_message=error_msg)
+        except:
+            pass
 
 
 @app.options("/webhook")
@@ -660,13 +661,42 @@ async def api_reprocess(call_id: str, x_admin_key: Optional[str] = Header(None))
     transcript = await fetch_call_transcript(call_id)
     if not transcript:
         raise HTTPException(404, "Call not found")
-    if transcript.get("status") != "failed":
-        raise HTTPException(400, f"Call status is '{transcript.get('status')}', not 'failed'")
+    
+    # Allow reprocessing of failed OR processing (stuck) calls
+    status = transcript.get("status")
+    if status not in ("failed", "processing", "received"):
+        raise HTTPException(400, f"Call status is '{status}', must be 'failed', 'processing', or 'received'")
     
     payload = transcript.get("raw_payload", {})
     payload["call_id"] = call_id
-    asyncio.create_task(_process_call(call_id, payload))
+    asyncio.create_task(_safe_process_call(call_id, payload))
     return JSONResponse({"status": "reprocessing", "call_id": call_id}, headers=CORS)
+
+
+@app.post("/api/calls/{call_id}/process-sync")
+async def api_process_sync(call_id: str, x_admin_key: Optional[str] = Header(None)):
+    """Process a call SYNCHRONOUSLY to see errors immediately (for debugging)."""
+    if not _verify_admin(x_admin_key):
+        raise HTTPException(401, "Invalid admin key")
+    
+    transcript = await fetch_call_transcript(call_id)
+    if not transcript:
+        raise HTTPException(404, "Call not found")
+    
+    payload = transcript.get("raw_payload", {})
+    payload["call_id"] = call_id
+    
+    try:
+        await _process_call(call_id, payload)
+        return JSONResponse({"status": "processed", "call_id": call_id}, headers=CORS)
+    except Exception as e:
+        import traceback
+        return JSONResponse({
+            "status": "error",
+            "call_id": call_id,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }, status_code=500, headers=CORS)
 
 @app.post("/api/calls/ingest")
 async def api_ingest(request: Request, x_admin_key: Optional[str] = Header(None)):
@@ -913,6 +943,86 @@ async def api_call_history():
     except Exception as e:
         _log("error", "api_call_history_failed", error=str(e))
         return JSONResponse({"calls": [], "error": str(e)}, headers=CORS)
+
+
+@app.post("/api/debug/test-agent")
+async def api_debug_test_agent(request: Request, x_admin_key: Optional[str] = Header(None)):
+    """Debug endpoint: Test agent creation with detailed error response."""
+    if not _verify_admin(x_admin_key):
+        raise HTTPException(401, "Invalid admin key")
+    
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    username = body.get("username", "TestUser")
+    avatar_key = body.get("avatar", "scott").lower()
+    
+    # Get avatar config
+    avatar_config = get_avatar_config(avatar_key)
+    agent_name = avatar_config["name"]
+    avatar_id = avatar_config["id"]
+    
+    # Build agent config
+    try:
+        call_history = await asyncio.to_thread(get_call_history)
+    except Exception as e:
+        call_history = []
+    
+    agent_config = build_agent_config(
+        call_history=call_history,
+        username=username,
+        agent_name=agent_name,
+        avatar_id=avatar_id,
+    )
+    
+    # Return config details without creating agent
+    debug_info = {
+        "avatar_key": avatar_key,
+        "agent_name": agent_name,
+        "avatar_id": avatar_id,
+        "prompt_length": len(agent_config["system_prompt"]),
+        "greeting_length": len(agent_config["greeting"]),
+        "prompt_under_10k": len(agent_config["system_prompt"]) <= 10000,
+        "greeting_preview": agent_config["greeting"][:200],
+        "prompt_preview": agent_config["system_prompt"][:500] + "...",
+    }
+    
+    # Try to create agent
+    try:
+        agent = await asyncio.to_thread(
+            create_agent,
+            name=agent_config["name"],
+            system_prompt=agent_config["system_prompt"],
+            greeting=agent_config["greeting"],
+            avatar_id=agent_config["avatar_id"],
+        )
+        
+        if agent and agent.get("id"):
+            # Delete test agent immediately
+            await asyncio.to_thread(delete_agent, agent["id"])
+            return JSONResponse({
+                "status": "success",
+                "message": "Agent created and deleted successfully",
+                "agent_id": agent["id"],
+                "debug": debug_info
+            }, headers=CORS)
+        else:
+            return JSONResponse({
+                "status": "failed",
+                "message": "Agent creation returned None",
+                "debug": debug_info
+            }, headers=CORS)
+            
+    except Exception as e:
+        import traceback
+        return JSONResponse({
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc(),
+            "debug": debug_info
+        }, headers=CORS)
 
 
 # ============================================================

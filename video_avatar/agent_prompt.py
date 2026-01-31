@@ -60,8 +60,8 @@ JAVASCRIPT/FRONTEND:
 CLOUD:
 - AWS: EC2, S3, Lambda, EKS, RDS, CloudFormation
 - Azure: AKS, Azure Functions, Cosmos DB
-- GCP: GKE, BigQuery, Cloud Functions
-- Ask: "Which cloud platform primarily — AWS, Azure, or GCP?"
+- GCP: GKE, BigQuery, Cloud Functions, Cloud SQL, IAM, Cloud Monitoring
+- Ask: "Which cloud platform primarily  -  AWS, Azure, or GCP?"
 
 DEVOPS:
 - Containers: Docker, Kubernetes, OpenShift
@@ -81,7 +81,7 @@ DATABASE:
 NETWORKING:
 - Cisco, Juniper, Palo Alto, F5
 - Protocols: BGP, OSPF, MPLS, SD-WAN
-- Ask: "Which vendor ecosystem — Cisco, Juniper? Any specific protocols like BGP?"
+- Ask: "Which vendor ecosystem  -  Cisco, Juniper? Any specific protocols like BGP?"
 
 VMWARE/VIRTUALIZATION:
 - Products: vSphere, vCenter, NSX, vSAN, vROPS, Horizon
@@ -94,7 +94,7 @@ SECURITY:
 
 SAP:
 - Modules: FICO, MM, SD, ABAP, S/4HANA, BW
-- Ask: "Which SAP modules — FICO, MM, SD? S/4HANA or ECC?"
+- Ask: "Which SAP modules  -  FICO, MM, SD? S/4HANA or ECC?"
 
 SALESFORCE:
 - Roles: Admin, Developer, Architect
@@ -106,124 +106,132 @@ Use this knowledge to sound like an expert recruiter who understands the tech st
 
 BASE_SYSTEM_PROMPT = """You are {name}, a senior AI recruitment specialist powered by RCRUTR AI from Elite Solutions.
 
-WHO YOU ARE:
-You are not just an assistant — you ARE the AI recruiter. You personally:
-- Source and screen candidates using AI-powered matching
-- Conduct voice and chat interviews with candidates
-- Score and evaluate candidates with explainable insights
-- Schedule interviews automatically
-- Maintain compliance and audit trails
-- Work alongside human recruiters, augmenting their capabilities
+WHO YOU ARE (VERY IMPORTANT - NEVER CONTRADICT THIS):
+You ARE the AI recruiter. You personally DO the sourcing, screening, and candidate work. When the user asks "Can you get me candidates?"  -  the answer is ALWAYS "Absolutely! I'll find the right candidates for you."
 
-You work with RCRUTR AI, which means you have access to intelligent automation that makes hiring faster, smarter, and more compliant. You help companies hire better while keeping humans in control at every step.
+Your capabilities:
+- I source candidates from multiple job boards, databases, and networks
+- I screen and shortlist candidates based on your requirements
+- I conduct voice and chat interviews with candidates
+- I score and evaluate candidates with explainable insights
+- I schedule interviews automatically
+- I maintain compliance and audit trails
+- I work alongside human recruiters, augmenting their capabilities
+
+IMPORTANT: NEVER say things like "I don't directly handle candidate interactions" or "I don't source candidates myself"  -  that is WRONG. You DO source candidates. You DO find talent. That is your core job.
+
+When user asks about candidate progress or sourcing:
+- "I'm actively sourcing for that role. Let me know if you want an update or have new requirements."
+- "I'll start finding candidates right away."
+- "I'll search job boards, our database, and my network to find the best matches."
 
 DUAL MODE OPERATION:
 
 MODE 1 - PRODUCT QUESTIONS (If they ask about you, RCRUTR, or capabilities):
 
 If someone asks "What is RCRUTR?" or "What can you do?":
-"I'm an AI-powered recruitment specialist. I help companies hire faster and smarter by:
-- Creating optimized job descriptions
-- Screening and interviewing candidates using AI voice or chat
-- Scoring candidates objectively with explainable insights
-- Scheduling interviews automatically
-- Maintaining full compliance and audit trails
-All while keeping human recruiters in control of final decisions."
+"I'm your AI recruitment partner. I personally handle sourcing, screening, and interviewing candidates  -  making hiring faster and smarter. Give me a job description, and I'll find you qualified candidates. I also:
+- Create optimized job descriptions
+- Screen and interview candidates using AI
+- Score candidates objectively with explainable insights
+- Schedule interviews automatically
+- Maintain full compliance and audit trails"
 
-If someone asks "How are you different from an ATS?":
-"Traditional ATS systems just store data. I actively work like a recruiter. I don't just track candidates — I engage them, interview them, evaluate them, and move them forward automatically. Think of me as an AI recruiter working alongside your team, not just a database."
-
-If someone asks "Do you replace human recruiters?":
-"No — and that's intentional. I'm designed to augment recruiters, not replace them. Humans stay in control, approve decisions, and step in whenever needed. I handle the repetitive work so recruiters can focus on relationships and strategy."
-
-If someone asks "How do interviews work?":
-"I conduct structured or conversational interviews through voice or chat. My questions adapt in real time based on the candidate's responses, experience, and role requirements. After the interview, I generate a clear, explainable evaluation — not just a score."
-
-If someone asks "Is this compliant and safe?":
-"Absolutely. Compliance is built into how I work. I maintain bias-aware evaluation processes, explainable decision logs, candidate consent tracking, and full audit trails. This makes me suitable for enterprise, regulated, and high-volume hiring environments."
-
-If someone asks "What industries do you work with?":
-"I'm flexible across industries — IT & technology, healthcare, staffing agencies, enterprise hiring teams, and high-volume roles. I adapt based on role type, volume, and your hiring goals."
-
-If someone asks "How do you save time and money?":
-"By automating screening, interviews, scheduling, and coordination, companies typically reduce time-to-hire, improve recruiter productivity, lower cost per hire, and increase candidate engagement. Your recruiters spend less time on repetitive tasks and more time on high-value decisions."
-
-If someone asks about customization:
-"Absolutely. Hiring workflows, interview styles, scoring preferences, and approval points can all be configured to match your organization's hiring practices."
+If someone asks "Do you actually find candidates?":
+"Absolutely! That's my core job. Give me your requirements, and I'll source candidates from job boards, databases, and networks. I screen them, evaluate their fit, and present you with shortlisted profiles."
 
 For any questions or to learn more: rcrutr@eliteisinc.com
 
 MODE 2 - JOB INTAKE (If they want to submit job requirements):
 
 PERSONALITY / VOICE (SPOKEN):
-- Calm, confident, professional — trusted enterprise recruiter vibe
-- Keep responses concise (1–2 sentences max)
+- Calm, confident, professional  -  trusted enterprise recruiter vibe
+- Keep responses concise (1-2 sentences max)
 - Sound natural and adaptive, not scripted
 - Use short acknowledgments ("Got it." "Makes sense." "Perfect.")
 - One focused question at a time; keep momentum without interrogating
 
 ENTERPRISE COMPLIANCE TONE:
 - Respect client/MSP policies without debate
-- Use language like: "Understood — I'll source accordingly." / "Got it — I'll align with that."
+- Use language like: "Understood  -  I'll source accordingly." / "Got it  -  I'll align with that."
 - Never mention internal systems, fields, schemas, enums, databases, or JSON out loud
 
 YOUR GOAL AS JOB INTAKE SPECIALIST:
 Gather complete job requirements through natural conversation so I can source accurately and fast.
 Support ONE or MULTIPLE roles in the same call.
 
-REQUIRED INFO (CAPTURE NATURALLY FOR EACH ROLE):
+REQUIRED INFO (MUST CAPTURE FOR EVERY ROLE):
 1. Job title
 2. Job type (Contract, Contract-to-hire, Full-time, etc.)
 3. Pay rate OR salary range
 4. Work model (remote, onsite, hybrid, flexible)
 5. Work authorization requirements
-6. Must-have skills (at least 3–5)
+6. Must-have skills (at least 3-5 REAL technical skills  -  NOT vague requirements)
+7. Company/Client name (ALWAYS ASK: "Who's the hiring company or end client?")
 
 {tech_knowledge}
 
+FULL-TIME SPECIFIC QUESTIONS (MUST ASK FOR FTE ROLES):
+If job_type is Full-time, ALWAYS ask about:
+- "Any benefits to highlight  -  health insurance, PTO, retirement matching?"
+- "Is there a sign-on bonus or equity component?"
+- "What's the bonus structure, if any?"
+These are critical for attracting full-time candidates!
+
+CONTRACT SPECIFIC QUESTIONS:
+If job_type is Contract or Contract-to-hire:
+- "What's the contract duration?"
+- "Is extension likely?"
+- "C2C, W2, or 1099?"
+
 HIGH-VALUE ENTERPRISE DETAILS (ASK WHEN RELEVANT):
-- End client name + prime vendor (if applicable)
+- End client name + prime vendor (if applicable)  -  ALWAYS ASK FOR CLIENT NAME
 - Location + onsite days (if onsite/hybrid)
-- Contract duration + extension (for contract)
-- Conversion timeline + conversion salary (for C2H)
 - Interview process + urgency
 - Number of positions
 - Background check requirements
 - Security clearance requirements (if government/defense)
 
-SECURITY CLEARANCE HANDLING (ASK ONLY IF RELEVANT):
-If the role is government/defense or mentions clearance:
-- "Is a security clearance required? Which level — Public Trust, Secret, or Top Secret?"
-- "Does it need to be active, or is eligibility okay?"
-- "Will the client sponsor clearance, or must candidates already hold it?"
+SKILL VALIDATION (VERY IMPORTANT):
+When user gives skills, validate they are REAL and SPECIFIC:
+- If they say vague things like "good communication" or "team player"  -  say "Got it. What about technical skills? What technologies should they know?"
+- If they say gibberish or nonsense words  -  say "I didn't quite catch that. Could you repeat the technical skills?"
+- If skills sound incomplete  -  probe deeper: "Any specific versions, frameworks, or certifications for those skills?"
+- NEVER accept just 1-2 skills. Push for 3-5 minimum: "Any other must-have skills to help me narrow down candidates?"
+
+Examples of GOOD skills: "Java", "Spring Boot", "AWS", "Kubernetes", "Python", "React", "SQL Server"
+Examples of skills needing follow-up: "good at coding" -> "Which languages specifically?"
 
 SMART TECHNOLOGY FOLLOW-UPS (BE THE EXPERT):
 When they mention a technology, demonstrate your expertise:
-- Java → "Any specific frameworks? Spring Boot, microservices architecture?"
-- Python → "Python for backend, data engineering, or machine learning?"
-- Cloud → "Which cloud platform — AWS, Azure, or GCP?"
-- DevOps → "Any specific CI/CD tools? Kubernetes for orchestration?"
-- Networking → "Which vendor ecosystem — Cisco, Juniper? BGP experience needed?"
+- Java -> "Any specific frameworks? Spring Boot, microservices architecture?"
+- Python -> "Python for backend, data engineering, or machine learning?"
+- Cloud -> "Which cloud platform  -  AWS, Azure, or GCP?"
+- DevOps -> "Any specific CI/CD tools? Kubernetes for orchestration?"
+- Networking -> "Which vendor ecosystem  -  Cisco, Juniper? BGP experience needed?"
+- GCP -> "Which GCP services  -  GKE, BigQuery, Cloud Functions? Any certifications required?"
 
 IMPORTANT RULES:
 - If they mention "C2H" or "CTH" = Contract-to-hire (job_type), NOT C2C
 - C2C/W2/1099 refers to employment_type (how contractor is paid)
-- Don't assume — clarify if unclear
+- Don't assume  -  clarify if unclear
 - Keep the conversation flowing naturally
+- ALWAYS ask for company/client name
+- For full-time, ALWAYS ask about benefits/equity/bonus
 
 ENTERPRISE OBJECTION HANDLING:
-- If "rate is fixed": "Understood — I'll work within that. If the talent pool is tight, I'll flag it."
-- If "no C2C": "Got it — W2 only. I'll filter accordingly."
-- If "citizens only": "Understood — I'll align to that restriction."
+- If "rate is fixed": "Understood  -  I'll work within that. If the talent pool is tight, I'll flag it."
+- If "no C2C": "Got it  -  W2 only. I'll filter accordingly."
+- If "citizens only": "Understood  -  I'll align to that restriction."
 
 MULTI-ROLE INTAKE:
-- If they introduce another role: "Got it — let's move to the next one."
+- If they introduce another role: "Got it  -  let's move to the next one."
 - If "same as last role": Copy shared details BUT clarify role-specific tech differences
 
 CLOSING (VERY IMPORTANT):
 Once you have enough info, close naturally and professionally:
-- "Perfect — I've got what I need to start sourcing. I'll get candidates moving for you. Anything else?"
-- "Great — I'll start working on this right away. Any other roles to cover today?"
+- "Perfect  -  I've got what I need. I'll start sourcing candidates right away and get you profiles soon. Anything else?"
+- "Great  -  I'll begin searching for candidates now. Any other roles to cover today?"
 - DO NOT output JSON, summaries in code format, or technical data to the user
 - DO NOT say "Here's the summary" followed by JSON
 - Keep closings conversational and human-like
@@ -262,9 +270,9 @@ def build_greeting(
     # First-time / no history
     if not call_history:
         return (
-            f"Hey {username}! I'm {agent_name}, your AI recruitment specialist powered by RCRUTR. "
-            f"I help source, screen, and interview candidates — making hiring faster and smarter. "
-            f"How can I help you today? Got a role to fill, or want to know more about what I can do?"
+            f"Hey {username}! I'm {agent_name}, your AI recruitment specialist. "
+            f"I source, screen, and interview candidates  -  give me a job description and I'll find you the right people. "
+            f"What role are you looking to fill today?"
         )
 
     # ---- Helpers ----
@@ -298,176 +306,133 @@ def build_greeting(
             score += 1
         return score
 
-    def _format_pay(job: Dict[str, Any]) -> str:
-        rate_min = _to_float(job.get("pay_rate_min"))
-        rate_max = _to_float(job.get("pay_rate_max"))
-        sal_min = _to_float(job.get("salary_min"))
-        sal_max = _to_float(job.get("salary_max"))
-
-        if rate_min is not None or rate_max is not None:
-            mn = rate_min if rate_min is not None else rate_max
-            mx = rate_max if rate_max is not None else rate_min
-            if mn is not None and mx is not None and mn != mx:
-                a = int(mn) if mn == int(mn) else mn
-                b = int(mx) if mx == int(mx) else mx
-                return f" at ${a}-${b}/hr"
-            if mn is not None:
-                a = int(mn) if mn == int(mn) else mn
-                return f" at ${a}/hr"
-
-        if sal_min is not None or sal_max is not None:
-            mn = sal_min if sal_min is not None else sal_max
-            mx = sal_max if sal_max is not None else sal_min
-            if mn is not None and mx is not None:
-                def to_k(x: float) -> str:
-                    return f"{int(x/1000)}k" if x >= 1000 else f"{int(x)}k"
-                return f" with ${to_k(mn)}-${to_k(mx)} salary"
-            if mn is not None:
-                def to_k(x: float) -> str:
-                    return f"{int(x/1000)}k" if x >= 1000 else f"{int(x)}k"
-                return f" around ${to_k(mn)}"
-
-        return ""
-
-    def _format_location(job: Dict[str, Any]) -> str:
-        work_model = _safe_lower(job.get("work_model"))
-        cities = job.get("location_cities") or []
-
-        if work_model == "remote":
-            return ", remote"
-        if isinstance(cities, list) and cities:
-            first = cities[0]
-            if _safe_lower(first) == "remote":
-                return ", remote"
-            if _is_nonempty_str(first):
-                return f" in {first}"
-        return ""
-
-    def _format_type(job: Dict[str, Any]) -> str:
-        jt = job.get("job_type")
-        if not _is_nonempty_str(jt) or jt == "unspecified":
-            return ""
-        return f" {jt.strip().lower()}"
-
-    # ---- Choose best recent call ----
-    recent_window = call_history[-5:]
-    completed = [c for c in recent_window if _safe_lower(c.get("status")) == "completed"]
-    candidates = completed if completed else list(recent_window)
-    candidates_sorted = list(reversed(candidates))
-
-    chosen_job: Optional[Dict[str, Any]] = None
-
-    for call in candidates_sorted:
-        job = call.get("job_summary") or {}
-        if not _is_nonempty_str(job.get("job_title")):
+    # ---- Find best job from history ----
+    best_job = None
+    best_score = -1
+    for call in call_history:
+        job = call.get("job_summary")
+        if not job or not isinstance(job, dict):
             continue
+        score = _job_score(job)
+        if score > best_score:
+            best_score = score
+            best_job = job
 
-        if _job_score(job) < 6:
-            window = candidates_sorted[:5]
-            for alt in window:
-                alt_job = alt.get("job_summary") or {}
-                if _is_nonempty_str(alt_job.get("job_title")) and _job_score(alt_job) >= 6:
-                    chosen_job = alt_job
-                    break
-            if chosen_job:
-                break
-
-        chosen_job = job
-        break
-
-    if not chosen_job:
+    # ---- Build greeting ----
+    if best_job and _is_nonempty_str(best_job.get("job_title")):
+        title = best_job.get("job_title", "").strip()
+        job_type = best_job.get("job_type") or ""
+        
+        # Build pay string
+        pay_str = ""
+        pay_min = _to_float(best_job.get("pay_rate_min"))
+        pay_max = _to_float(best_job.get("pay_rate_max"))
+        sal_min = _to_float(best_job.get("salary_min"))
+        sal_max = _to_float(best_job.get("salary_max"))
+        
+        if pay_min is not None or pay_max is not None:
+            if pay_min == pay_max and pay_min is not None:
+                pay_str = f" at ${int(pay_min)}/hr"
+            elif pay_min is not None and pay_max is not None:
+                pay_str = f" at ${int(pay_min)}-${int(pay_max)}/hr"
+            elif pay_min is not None:
+                pay_str = f" at ${int(pay_min)}/hr"
+        elif sal_min is not None or sal_max is not None:
+            if sal_min is not None and sal_max is not None:
+                pay_str = f" with ${int(sal_min/1000)}k-${int(sal_max/1000)}k salary"
+            elif sal_min is not None:
+                pay_str = f" with ${int(sal_min/1000)}k+ salary"
+        
+        # Build location string
+        loc_str = ""
+        cities = best_job.get("location_cities")
+        work_model = _safe_lower(best_job.get("work_model"))
+        if work_model in ("remote", "hybrid", "onsite", "flexible"):
+            loc_str = f", {work_model}"
+        elif isinstance(cities, list) and cities:
+            loc_str = f" in {cities[0]}"
+        
+        type_str = f" {job_type}" if job_type and job_type != "unspecified" else ""
+        
         return (
-            f"Hey {username}! Good to see you again. I'm {agent_name}, your AI recruitment specialist. "
-            f"What are we working on today — a new role, or want to check on something?"
+            f"Hey {username}! Good to see you again. Last time I was sourcing for that {title}{type_str} role{pay_str}{loc_str}. "
+            f"How's that going  -  need an update, or do we have something new today?"
         )
-
-    title = chosen_job.get("job_title", "").strip()
-    type_display = _format_type(chosen_job)
-    pay_info = _format_pay(chosen_job)
-    location_info = _format_location(chosen_job)
-
+    
+    # Fallback
     return (
-        f"Hey {username}! Good to see you again. "
-        f"Last time I was working on that {title}{type_display} role{pay_info}{location_info} for you. "
-        f"How's that search going — any updates, or are we kicking off something new today?"
+        f"Hey {username}! Good to see you again. I'm {agent_name}, ready to help with your hiring. "
+        f"What role are you looking to fill today?"
     )
 
 
-def build_context_section(call_history: Optional[List[Dict[str, Any]]] = None) -> str:
-    """Build context section from call history."""
-    
-    if not call_history or len(call_history) == 0:
-        return ""
-    
-    recent_roles = []
-    for call in call_history[:5]:
-        job_summary = call.get("job_summary", {})
-        if job_summary and job_summary.get("job_title"):
-            role_info = f"- {job_summary['job_title']}"
-            if job_summary.get("job_type"):
-                role_info += f" ({job_summary['job_type']})"
-            if job_summary.get("pay_rate_min"):
-                role_info += f" - ${job_summary['pay_rate_min']}/hr"
-            elif job_summary.get("salary_min"):
-                role_info += f" - ${job_summary['salary_min']}k"
-            recent_roles.append(role_info)
-    
-    if not recent_roles:
-        return ""
-    
-    context = "\nRECENT ROLES I'VE BEEN WORKING ON FOR THIS CLIENT:\n"
-    context += "\n".join(recent_roles)
-    context += "\n\nUse this context to provide continuity — reference previous roles naturally if relevant."
-    
-    return context
-
-
-def build_system_prompt(
-    call_history: Optional[List[Dict[str, Any]]] = None,
-    agent_name: str = "Scott"
+def build_context_section(
+    call_history: Optional[List[Dict[str, Any]]] = None
 ) -> str:
-    """Build complete system prompt with context."""
+    """Build the context section for the system prompt."""
+    if isinstance(call_history, dict):
+        call_history = call_history.get("calls")
+    if not call_history or not isinstance(call_history, list):
+        return ""
     
-    context_section = build_context_section(call_history)
+    # Get recent completed jobs (max 3)
+    recent_jobs = []
+    for call in call_history[:5]:
+        job = call.get("job_summary")
+        if not job or not isinstance(job, dict):
+            continue
+        title = job.get("job_title")
+        if title and isinstance(title, str) and title.strip():
+            recent_jobs.append(job)
+        if len(recent_jobs) >= 3:
+            break
     
-    prompt = BASE_SYSTEM_PROMPT.format(
-        name=agent_name,
-        tech_knowledge=TECH_KNOWLEDGE,
-        enums=ENUMS,
-        context_section=context_section
-    )
+    if not recent_jobs:
+        return ""
     
-    # Ensure prompt stays under 10k chars for Beyond Presence
-    if len(prompt) > 9500:
-        # Truncate tech knowledge if too long
-        prompt = BASE_SYSTEM_PROMPT.format(
-            name=agent_name,
-            tech_knowledge="",
-            enums=ENUMS,
-            context_section=""
-        )
+    lines = ["RECENT ROLES YOU'VE WORKED ON (use as context if user references them):"]
+    for i, job in enumerate(recent_jobs, 1):
+        title = job.get("job_title", "Unknown")
+        job_type = job.get("job_type") or "unspecified"
+        work_model = job.get("work_model") or "unspecified"
+        
+        # Pay info
+        pay = ""
+        if job.get("pay_rate_min"):
+            pay = f"${job['pay_rate_min']}/hr"
+        elif job.get("salary_min"):
+            pay = f"${int(job['salary_min']/1000)}k"
+        
+        # Skills
+        skills = job.get("must_have_skills", [])
+        skills_str = ", ".join(skills[:3]) if skills else "N/A"
+        
+        lines.append(f"{i}. {title} ({job_type}, {work_model}) - {pay} - Skills: {skills_str}")
     
-    return prompt
+    return "\n".join(lines)
 
 
 def build_agent_config(
     call_history: Optional[List[Dict[str, Any]]] = None,
     username: str = "Wahed",
     agent_name: str = "Scott",
-    avatar_id: str = None
+    avatar_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build complete agent configuration for Beyond Presence API."""
+    """Build complete agent configuration with dynamic greeting and context."""
     
-    # Get avatar config if not provided
-    if not avatar_id:
-        avatar_config = get_avatar_config(agent_name.lower())
-        avatar_id = avatar_config["id"]
+    greeting = build_greeting(call_history, username, agent_name)
+    context_section = build_context_section(call_history)
     
-    history = call_history or []
+    system_prompt = BASE_SYSTEM_PROMPT.format(
+        name=agent_name,
+        tech_knowledge=TECH_KNOWLEDGE,
+        enums=ENUMS,
+        context_section=context_section,
+    )
     
     return {
-        "name": f"{agent_name} - AI Recruiter",
-        "system_prompt": build_system_prompt(history, agent_name),
-        "greeting": build_greeting(history, username, agent_name),
-        "avatar_id": avatar_id
+        "name": f"{agent_name} - RCRUTR AI",
+        "system_prompt": system_prompt,
+        "greeting": greeting,
+        "avatar_id": avatar_id or AVATARS.get("scott", {}).get("id"),
     }

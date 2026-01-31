@@ -47,6 +47,16 @@ def create_agent(
     
     Returns agent object with id.
     """
+    # Validate inputs
+    if not system_prompt:
+        _log_event("error", "bey_create_agent_error", error="system_prompt is empty")
+        return None
+    
+    if len(system_prompt) > 10000:
+        _log_event("error", "bey_create_agent_error", 
+                   error=f"system_prompt too long: {len(system_prompt)} chars (max 10000)")
+        return None
+    
     try:
         payload = {
             "name": name,
@@ -54,6 +64,12 @@ def create_agent(
             "greeting": greeting,
             "avatar_id": avatar_id or DEFAULT_AVATAR_ID,
         }
+        
+        _log_event("info", "bey_create_agent_request",
+                   name=name,
+                   prompt_length=len(system_prompt),
+                   greeting_length=len(greeting),
+                   avatar_id=avatar_id or DEFAULT_AVATAR_ID)
         
         response = requests.post(
             f"{BEY_API_URL}/agent",
@@ -70,13 +86,26 @@ def create_agent(
         return data
     
     except requests.exceptions.HTTPError as e:
-        _log_event("error", "bey_create_agent_failed",
-                   status_code=e.response.status_code if e.response else None,
-                   response_text=e.response.text if e.response else None,
-                   error=str(e))
+        error_detail = {
+            "status_code": e.response.status_code if e.response else None,
+            "response_text": e.response.text[:500] if e.response and e.response.text else None,
+            "error": str(e),
+            "prompt_length": len(system_prompt),
+            "avatar_id": avatar_id or DEFAULT_AVATAR_ID,
+        }
+        _log_event("error", "bey_create_agent_failed", **error_detail)
+        return None
+    except requests.exceptions.Timeout as e:
+        _log_event("error", "bey_create_agent_timeout", error=str(e))
+        return None
+    except requests.exceptions.ConnectionError as e:
+        _log_event("error", "bey_create_agent_connection_error", error=str(e))
         return None
     except Exception as e:
-        _log_event("error", "bey_create_agent_error", error=str(e))
+        import traceback
+        _log_event("error", "bey_create_agent_error", 
+                   error=str(e), 
+                   traceback=traceback.format_exc()[:500])
         return None
 
 
