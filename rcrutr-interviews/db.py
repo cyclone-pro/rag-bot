@@ -1,10 +1,9 @@
-"""Database operations for RCRUTR Interviews."""
+"""Database operations for RCRUTR Interviews - Pure CRUD operations."""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,141 +40,9 @@ def generate_interview_id() -> str:
     return f"int_{uuid.uuid4().hex[:12]}"
 
 
-# =============================================================================
-# TABLE CREATION
-# =============================================================================
-
-CREATE_TABLE_SQL = """
--- candidate_interviews table for scheduled video interviews
-CREATE TABLE IF NOT EXISTS candidate_interviews (
-    -- Primary Key
-    id SERIAL PRIMARY KEY,
-    interview_id VARCHAR(64) UNIQUE NOT NULL,
-    
-    -- References
-    candidate_id VARCHAR(64) NOT NULL,
-    job_id VARCHAR(64) NOT NULL,
-    
-    -- Job Snapshot
-    job_title VARCHAR(256),
-    job_description TEXT,
-    job_company VARCHAR(256),
-    job_location VARCHAR(256),
-    
-    -- Candidate Snapshot
-    candidate_name VARCHAR(256),
-    candidate_email VARCHAR(256),
-    candidate_phone VARCHAR(64),
-    candidate_skills JSONB,
-    candidate_summary TEXT,
-    candidate_tech_stack JSONB,
-    candidate_employment_history JSONB,
-    
-    -- Scheduling
-    scheduled_time TIMESTAMPTZ NOT NULL,
-    timezone VARCHAR(64) DEFAULT 'UTC',
-    
-    -- Zoom Meeting Details
-    meeting_id VARCHAR(256),
-    meeting_url TEXT,
-    meeting_join_url TEXT,
-    meeting_passcode VARCHAR(64),
-    meeting_host_url TEXT,
-    meeting_created_at TIMESTAMPTZ,
-    
-    -- Bey/LiveKit Details
-    avatar_key VARCHAR(32) DEFAULT 'zara',
-    agent_id VARCHAR(64),
-    call_id VARCHAR(64),
-    livekit_url TEXT,
-    livekit_token TEXT,
-    livekit_room_name VARCHAR(256),
-    bot_id VARCHAR(64),
-    
-    -- Interview Status
-    interview_status VARCHAR(32) DEFAULT 'scheduled',
-    
-    -- Timing
-    avatar_joined_at TIMESTAMPTZ,
-    candidate_joined_at TIMESTAMPTZ,
-    interview_started_at TIMESTAMPTZ,
-    interview_ended_at TIMESTAMPTZ,
-    call_duration_seconds INTEGER,
-    
-    -- Questions
-    questions JSONB,
-    current_question_index INTEGER DEFAULT 0,
-    total_questions INTEGER DEFAULT 8,
-    questions_asked INTEGER DEFAULT 0,
-    
-    -- Transcript & Results
-    conversation_log JSONB,
-    full_transcript TEXT,
-    
-    -- Evaluation
-    sentiment_score DECIMAL(5,4),
-    keyword_matches JSONB,
-    evaluation_score DECIMAL(5,2),
-    fit_assessment TEXT,
-    evaluation_raw JSONB,
-    
-    -- Milvus Sync
-    milvus_synced BOOLEAN DEFAULT FALSE,
-    milvus_synced_at TIMESTAMPTZ,
-    
-    -- Processing
-    worker_id VARCHAR(64),
-    retry_count INTEGER DEFAULT 0,
-    error_message TEXT,
-    
-    -- Recruiter Notes
-    notes TEXT,
-    recruiter_id VARCHAR(64),
-    
-    -- Timestamps
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    completed_at TIMESTAMPTZ
-);
-
--- Indexes
-CREATE INDEX IF NOT EXISTS idx_candidate_interviews_interview_id ON candidate_interviews(interview_id);
-CREATE INDEX IF NOT EXISTS idx_candidate_interviews_candidate_id ON candidate_interviews(candidate_id);
-CREATE INDEX IF NOT EXISTS idx_candidate_interviews_job_id ON candidate_interviews(job_id);
-CREATE INDEX IF NOT EXISTS idx_candidate_interviews_status ON candidate_interviews(interview_status);
-CREATE INDEX IF NOT EXISTS idx_candidate_interviews_scheduled ON candidate_interviews(scheduled_time);
-CREATE INDEX IF NOT EXISTS idx_candidate_interviews_milvus ON candidate_interviews(milvus_synced);
-
--- Trigger to update updated_at
-CREATE OR REPLACE FUNCTION update_candidate_interviews_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trigger_update_candidate_interviews_updated_at ON candidate_interviews;
-CREATE TRIGGER trigger_update_candidate_interviews_updated_at
-    BEFORE UPDATE ON candidate_interviews
-    FOR EACH ROW
-    EXECUTE FUNCTION update_candidate_interviews_updated_at();
-"""
-
-
-async def create_tables() -> bool:
-    """Create the candidate_interviews table if not exists."""
-    db_url = _get_db_url()
-    try:
-        async with await AsyncConnection.connect(db_url) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(CREATE_TABLE_SQL)
-            await conn.commit()
-        _log_event("info", "db_tables_created")
-        return True
-    except Exception as e:
-        _log_event("error", "db_create_tables_failed", error=str(e))
-        raise
+def timezone_utc():
+    """Return UTC timezone."""
+    return timezone.utc
 
 
 # =============================================================================
@@ -188,7 +55,7 @@ async def insert_interview(
     job_id: str,
     scheduled_time: datetime,
     *,
-    timezone: str = "UTC",
+    timezone_str: str = "UTC",
     avatar_key: str = "zara",
     # Job data
     job_title: Optional[str] = None,
@@ -224,7 +91,7 @@ async def insert_interview(
         "candidate_id": candidate_id,
         "job_id": job_id,
         "scheduled_time": scheduled_time,
-        "timezone": timezone,
+        "timezone": timezone_str,
         "avatar_key": avatar_key,
         "interview_status": InterviewStatus.SCHEDULED.value,
         "job_title": job_title,
@@ -405,7 +272,7 @@ async def get_pending_interviews(
                     await cur.execute(
                         """
                         SELECT * FROM candidate_interviews 
-                        WHERE interview_status = 'scheduled'
+                        WHERE interview_status IN ('scheduled', 'meeting_created')
                           AND scheduled_time <= %s
                           AND scheduled_time >= %s
                         ORDER BY scheduled_time ASC
@@ -416,7 +283,7 @@ async def get_pending_interviews(
                     await cur.execute(
                         """
                         SELECT * FROM candidate_interviews 
-                        WHERE interview_status = 'scheduled'
+                        WHERE interview_status IN ('scheduled', 'meeting_created')
                           AND scheduled_time <= %s
                         ORDER BY scheduled_time ASC
                         """,
@@ -582,8 +449,3 @@ async def check_db_connection() -> Tuple[bool, str]:
     except Exception as e:
         _log_event("error", "db_health_failed", error=str(e))
         return (False, str(e))
-
-
-def timezone_utc():
-    """Return UTC timezone."""
-    return timezone.utc
