@@ -45,6 +45,83 @@ def timezone_utc():
     return timezone.utc
 
 
+async def create_tables() -> None:
+    """Create required tables if they do not exist."""
+    db_url = _get_db_url()
+    create_table_sql = """
+        CREATE TABLE IF NOT EXISTS candidate_interviews (
+            id BIGSERIAL PRIMARY KEY,
+            interview_id TEXT UNIQUE NOT NULL,
+            candidate_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            scheduled_time TIMESTAMPTZ NOT NULL,
+            timezone TEXT DEFAULT 'UTC',
+            avatar_key TEXT,
+            interview_status TEXT,
+            job_title TEXT,
+            job_description TEXT,
+            job_company TEXT,
+            job_location TEXT,
+            candidate_name TEXT,
+            candidate_email TEXT,
+            candidate_phone TEXT,
+            candidate_skills JSONB,
+            candidate_summary TEXT,
+            candidate_tech_stack JSONB,
+            candidate_employment_history JSONB,
+            meeting_id TEXT,
+            meeting_url TEXT,
+            meeting_passcode TEXT,
+            meeting_host_url TEXT,
+            meeting_created_at TIMESTAMPTZ,
+            questions JSONB,
+            total_questions INTEGER,
+            notes TEXT,
+            recruiter_id TEXT,
+            agent_id TEXT,
+            call_id TEXT,
+            livekit_url TEXT,
+            livekit_token TEXT,
+            bot_id TEXT,
+            avatar_joined_at TIMESTAMPTZ,
+            candidate_joined_at TIMESTAMPTZ,
+            interview_started_at TIMESTAMPTZ,
+            interview_ended_at TIMESTAMPTZ,
+            completed_at TIMESTAMPTZ,
+            error_message TEXT,
+            conversation_log JSONB,
+            full_transcript TEXT,
+            sentiment_score DOUBLE PRECISION,
+            evaluation_score DOUBLE PRECISION,
+            fit_assessment TEXT,
+            keyword_matches JSONB,
+            evaluation_raw JSONB,
+            questions_asked INTEGER,
+            call_duration_seconds INTEGER,
+            milvus_synced BOOLEAN DEFAULT FALSE,
+            milvus_synced_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_interview_id ON candidate_interviews (interview_id);
+        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_candidate_id ON candidate_interviews (candidate_id);
+        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_job_id ON candidate_interviews (job_id);
+        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_meeting_id ON candidate_interviews (meeting_id);
+        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_call_id ON candidate_interviews (call_id);
+        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_status ON candidate_interviews (interview_status);
+        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_scheduled_time ON candidate_interviews (scheduled_time);
+    """
+    try:
+        async with await AsyncConnection.connect(db_url) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(create_table_sql)
+            await conn.commit()
+        _log_event("info", "db_create_tables_ok")
+    except Exception as e:
+        _log_event("error", "db_create_tables_failed", error=str(e))
+        raise
+
+
 # =============================================================================
 # CRUD OPERATIONS
 # =============================================================================

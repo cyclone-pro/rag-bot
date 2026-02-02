@@ -1,7 +1,18 @@
 """Configuration and environment variables for RCRUTR Interviews."""
 
 import os
+from pathlib import Path
 from typing import Optional
+
+# Load environment variables from .env next to this file (if present).
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
+if _ENV_PATH.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_ENV_PATH)
+    except Exception:
+        # Keep runtime resilient if python-dotenv isn't installed.
+        pass
 
 # =============================================================================
 # ZOOM API
