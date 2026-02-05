@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from config import BEY_API_KEY, BEY_API_URL, AVATARS, DEFAULT_AVATAR
+from config import BEY_API_KEY, BEY_API_URL, AVATARS, DEFAULT_AVATAR, BEY_LLM_API_ID, BEY_LLM_MODEL, BEY_LLM_TEMPERATURE
 from models import BeyAgent, BeyCall, BeySendToExternalResponse
 
 logger = logging.getLogger("rcrutr_interviews_bey")
@@ -45,6 +45,7 @@ def create_agent(
     system_prompt: str,
     greeting: str,
     avatar_id: Optional[str] = None,
+    use_external_llm: bool = True,
 ) -> Optional[BeyAgent]:
     """
     Create a Bey agent for the interview.
@@ -54,6 +55,7 @@ def create_agent(
         system_prompt: The interview prompt
         greeting: Initial greeting message
         avatar_id: Bey avatar ID
+        use_external_llm: If True and OPENAI_LLM_API_ID is set, use GPT-4o-mini
     
     Returns:
         BeyAgent object or None if failed
@@ -78,8 +80,20 @@ def create_agent(
             "avatar_id": avatar_id,
         }
         
+        # Add external LLM configuration if available
+        if use_external_llm and BEY_LLM_API_ID:
+            payload["llm"] = {
+                "type": "openai_compatible",
+                "api_id": BEY_LLM_API_ID,
+                "model": BEY_LLM_MODEL,
+                "temperature": BEY_LLM_TEMPERATURE,
+            }
+            _log_event("info", "bey_create_agent_with_external_llm",
+                       model=BEY_LLM_MODEL, temperature=BEY_LLM_TEMPERATURE)
+        
         _log_event("info", "bey_create_agent_request",
-                   name=name, prompt_length=len(system_prompt), avatar_id=avatar_id)
+                   name=name, prompt_length=len(system_prompt), avatar_id=avatar_id,
+                   external_llm=bool(BEY_LLM_API_ID and use_external_llm))
         
         response = requests.post(
             f"{BEY_API_URL}/agent",

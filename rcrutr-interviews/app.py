@@ -30,7 +30,7 @@ from models import (
     CancelInterviewRequest,
 )
 from db import (
-    create_tables, check_db_connection,
+    check_db_connection,
     insert_interview, get_interview, list_interviews,
     update_interview, update_interview_status, update_interview_meeting,
     update_interview_bey, generate_interview_id,
@@ -75,12 +75,12 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown."""
     _log_event("info", "app_starting", service=SERVICE_NAME, version=SERVICE_VERSION)
     
-    # Create tables on startup
-    try:
-        await create_tables()
-        _log_event("info", "db_tables_ready")
-    except Exception as e:
-        _log_event("error", "db_tables_failed", error=str(e))
+    # Check database connection on startup
+    db_ok, db_msg = await check_db_connection()
+    if db_ok:
+        _log_event("info", "db_connection_ok")
+    else:
+        _log_event("warning", "db_connection_failed", error=db_msg)
     
     yield
     
@@ -623,13 +623,30 @@ async def wait_for_candidate(interview_id: str, meeting_id: str):
 async def bey_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Handle webhooks from Bey (call_ended, etc.)
+    
+    This endpoint receives all webhooks from Bey. It:
+    1. Checks if the agent belongs to a specific organization
+    2. Forwards to org's webhook if configured
+    3. Otherwise processes locally
     """
     try:
         body = await request.json()
         event_type = body.get("event_type", "")
+        call_data = body.get("call_data", {})
+        agent_id = call_data.get("agentId", "")
         
-        _log_event("info", "bey_webhook_received", event_type=event_type)
+        _log_event("info", "bey_webhook_received", 
+                   event_type=event_type, agent_id=agent_id)
         
+        # Check for multi-tenant routing
+        from webhook_handler import route_webhook_to_org
+        
+        if agent_id:
+            forward_result = await route_webhook_to_org(agent_id, body)
+            if forward_result and forward_result.get("status") == "forwarded":
+                return {"status": "forwarded", "organization_id": forward_result.get("organization_id")}
+        
+        # Process locally
         if event_type == "call_ended":
             payload = BeyCallEndedPayload(**body)
             background_tasks.add_task(process_call_ended, payload)
@@ -683,6 +700,59 @@ async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
             status_code=200,
             content={"status": "error", "message": str(e)},
         )
+
+
+# =============================================================================
+# SCHEDULER ENDPOINTS
+# =============================================================================
+
+@app.post("/api/scheduler/check")
+async def scheduler_check(background_tasks: BackgroundTasks):
+    """
+    Trigger the scheduler to check and start due interviews.
+    
+    Call this endpoint via Cloud Scheduler every minute to ensure
+    interviews start at their scheduled time.
+    """
+    from scheduler import check_and_start_interviews
+    
+    _log_event("info", "scheduler_check_triggered")
+    
+    started = await check_and_start_interviews()
+    
+    return {
+        "status": "ok",
+        "interviews_started": len(started),
+        "interview_ids": started,
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/scheduler/upcoming")
+async def scheduler_upcoming(hours: int = 24):
+    """
+    Get interviews scheduled in the next N hours.
+    
+    Useful for monitoring what interviews are coming up.
+    """
+    from scheduler import get_upcoming_interviews
+    
+    interviews = await get_upcoming_interviews(hours=hours)
+    
+    return {
+        "count": len(interviews),
+        "hours": hours,
+        "interviews": [
+            {
+                "interview_id": i["interview_id"],
+                "candidate_name": i.get("candidate_name"),
+                "job_title": i.get("job_title"),
+                "scheduled_time": i.get("scheduled_time").isoformat() if i.get("scheduled_time") else None,
+                "status": i.get("interview_status"),
+            }
+            for i in interviews
+        ],
+    }
 
 
 # =============================================================================

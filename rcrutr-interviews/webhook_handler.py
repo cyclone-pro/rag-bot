@@ -26,6 +26,134 @@ def _log_event(level: str, message: str, **fields: Any) -> None:
     getattr(logger, level if level in ("warning", "error") else "info")(json.dumps(payload))
 
 
+async def get_org_by_agent(agent_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Look up which organization owns an agent.
+    
+    This is used for multi-tenant webhook routing.
+    When Bey sends a webhook, we look up which org the agent belongs to.
+    """
+    from db import _get_db_url
+    from psycopg import AsyncConnection
+    from psycopg.rows import dict_row
+    
+    try:
+        db_url = _get_db_url()
+        async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    SELECT 
+                        m.agent_id,
+                        m.organization_id,
+                        m.agent_name,
+                        m.avatar_key,
+                        m.purpose,
+                        o.name as org_name,
+                        o.webhook_url,
+                        o.webhook_secret
+                    FROM agent_org_mapping m
+                    JOIN organizations o ON m.organization_id = o.organization_id
+                    WHERE m.agent_id = %s AND m.is_active = TRUE
+                """, (agent_id,))
+                row = await cur.fetchone()
+                return dict(row) if row else None
+    except Exception as e:
+        _log_event("warning", "get_org_by_agent_failed", agent_id=agent_id, error=str(e))
+        return None
+
+
+async def register_agent_for_org(
+    agent_id: str,
+    organization_id: str,  # UUID as string
+    agent_name: str = None,
+    avatar_key: str = None,
+    purpose: str = "interview",
+) -> bool:
+    """
+    Register an agent as belonging to an organization.
+    
+    Call this after creating a Bey agent to track which org owns it.
+    """
+    from db import _get_db_url
+    from psycopg import AsyncConnection
+    
+    try:
+        db_url = _get_db_url()
+        async with await AsyncConnection.connect(db_url) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    INSERT INTO agent_org_mapping (agent_id, organization_id, agent_name, avatar_key, purpose)
+                    VALUES (%s, %s::uuid, %s, %s, %s)
+                    ON CONFLICT (agent_id) DO UPDATE SET
+                        organization_id = EXCLUDED.organization_id,
+                        agent_name = EXCLUDED.agent_name,
+                        avatar_key = EXCLUDED.avatar_key,
+                        purpose = EXCLUDED.purpose,
+                        last_used_at = NOW()
+                """, (agent_id, organization_id, agent_name, avatar_key, purpose))
+            await conn.commit()
+        _log_event("info", "agent_registered_for_org", agent_id=agent_id, organization_id=organization_id)
+        return True
+    except Exception as e:
+        _log_event("error", "register_agent_for_org_failed", agent_id=agent_id, error=str(e))
+        return False
+
+
+async def route_webhook_to_org(
+    agent_id: str,
+    payload: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Route a webhook to the appropriate organization.
+    
+    If the org has a custom webhook_url, forward the payload there.
+    Otherwise, process it locally.
+    
+    Returns:
+        Response from org's webhook, or None if processed locally
+    """
+    import requests
+    
+    org = await get_org_by_agent(agent_id)
+    
+    if not org:
+        _log_event("info", "webhook_no_org_mapping", agent_id=agent_id)
+        return None  # Process locally
+    
+    webhook_url = org.get("webhook_url")
+    
+    if not webhook_url:
+        _log_event("info", "webhook_org_no_custom_url", 
+                   agent_id=agent_id, organization_id=str(org.get("organization_id")))
+        return None  # Process locally
+    
+    # Forward to org's webhook
+    _log_event("info", "webhook_forwarding_to_org",
+               agent_id=agent_id, organization_id=str(org.get("organization_id")), webhook_url=webhook_url[:50])
+    
+    try:
+        headers = {"Content-Type": "application/json"}
+        if org.get("webhook_secret"):
+            headers["X-Webhook-Secret"] = org["webhook_secret"]
+        
+        response = requests.post(
+            webhook_url,
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        
+        return {
+            "status": "forwarded",
+            "organization_id": str(org.get("organization_id")),
+            "response_status": response.status_code,
+        }
+    except Exception as e:
+        _log_event("error", "webhook_forward_failed",
+                   agent_id=agent_id, organization_id=str(org.get("organization_id")), error=str(e))
+        return {"status": "forward_failed", "error": str(e)}
+
+
 async def process_call_ended(payload: BeyCallEndedPayload) -> Dict[str, Any]:
     """
     Process a call_ended webhook from Bey.

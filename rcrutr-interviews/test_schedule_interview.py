@@ -8,6 +8,7 @@ This script:
 3. Schedules an interview via the API
 4. Outputs the meeting link
 
+Run: python test_schedule_interview.py
 """
 
 import os

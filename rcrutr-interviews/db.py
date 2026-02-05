@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone as tz
 from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg import AsyncConnection
@@ -17,6 +17,10 @@ from models import InterviewStatus
 
 logger = logging.getLogger("rcrutr_interviews_db")
 
+
+# =============================================================================
+# HELPERS (defined first so they can be used below)
+# =============================================================================
 
 def _log_event(level: str, message: str, **fields: Any) -> None:
     """Structured logging."""
@@ -35,91 +39,14 @@ def _get_db_url() -> str:
     return db_url
 
 
+def _utc_now() -> datetime:
+    """Return current UTC datetime."""
+    return datetime.now(tz=tz.utc)
+
+
 def generate_interview_id() -> str:
     """Generate unique interview ID."""
     return f"int_{uuid.uuid4().hex[:12]}"
-
-
-def timezone_utc():
-    """Return UTC timezone."""
-    return timezone.utc
-
-
-async def create_tables() -> None:
-    """Create required tables if they do not exist."""
-    db_url = _get_db_url()
-    create_table_sql = """
-        CREATE TABLE IF NOT EXISTS candidate_interviews (
-            id BIGSERIAL PRIMARY KEY,
-            interview_id TEXT UNIQUE NOT NULL,
-            candidate_id TEXT NOT NULL,
-            job_id TEXT NOT NULL,
-            scheduled_time TIMESTAMPTZ NOT NULL,
-            timezone TEXT DEFAULT 'UTC',
-            avatar_key TEXT,
-            interview_status TEXT,
-            job_title TEXT,
-            job_description TEXT,
-            job_company TEXT,
-            job_location TEXT,
-            candidate_name TEXT,
-            candidate_email TEXT,
-            candidate_phone TEXT,
-            candidate_skills JSONB,
-            candidate_summary TEXT,
-            candidate_tech_stack JSONB,
-            candidate_employment_history JSONB,
-            meeting_id TEXT,
-            meeting_url TEXT,
-            meeting_passcode TEXT,
-            meeting_host_url TEXT,
-            meeting_created_at TIMESTAMPTZ,
-            questions JSONB,
-            total_questions INTEGER,
-            notes TEXT,
-            recruiter_id TEXT,
-            agent_id TEXT,
-            call_id TEXT,
-            livekit_url TEXT,
-            livekit_token TEXT,
-            bot_id TEXT,
-            avatar_joined_at TIMESTAMPTZ,
-            candidate_joined_at TIMESTAMPTZ,
-            interview_started_at TIMESTAMPTZ,
-            interview_ended_at TIMESTAMPTZ,
-            completed_at TIMESTAMPTZ,
-            error_message TEXT,
-            conversation_log JSONB,
-            full_transcript TEXT,
-            sentiment_score DOUBLE PRECISION,
-            evaluation_score DOUBLE PRECISION,
-            fit_assessment TEXT,
-            keyword_matches JSONB,
-            evaluation_raw JSONB,
-            questions_asked INTEGER,
-            call_duration_seconds INTEGER,
-            milvus_synced BOOLEAN DEFAULT FALSE,
-            milvus_synced_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            updated_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_interview_id ON candidate_interviews (interview_id);
-        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_candidate_id ON candidate_interviews (candidate_id);
-        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_job_id ON candidate_interviews (job_id);
-        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_meeting_id ON candidate_interviews (meeting_id);
-        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_call_id ON candidate_interviews (call_id);
-        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_status ON candidate_interviews (interview_status);
-        CREATE INDEX IF NOT EXISTS idx_candidate_interviews_scheduled_time ON candidate_interviews (scheduled_time);
-    """
-    try:
-        async with await AsyncConnection.connect(db_url) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(create_table_sql)
-            await conn.commit()
-        _log_event("info", "db_create_tables_ok")
-    except Exception as e:
-        _log_event("error", "db_create_tables_failed", error=str(e))
-        raise
 
 
 # =============================================================================
@@ -134,6 +61,7 @@ async def insert_interview(
     *,
     timezone_str: str = "UTC",
     avatar_key: str = "zara",
+    organization_id: Optional[str] = None,  # UUID as string
     # Job data
     job_title: Optional[str] = None,
     job_description: Optional[str] = None,
@@ -152,6 +80,7 @@ async def insert_interview(
     meeting_url: Optional[str] = None,
     meeting_passcode: Optional[str] = None,
     meeting_host_url: Optional[str] = None,
+    meeting_created_at: Optional[datetime] = None,
     # Questions
     questions: Optional[List[Dict]] = None,
     total_questions: int = 8,
@@ -163,6 +92,10 @@ async def insert_interview(
     
     db_url = _get_db_url()
     
+    # Auto-set meeting_created_at if meeting_id is provided
+    if meeting_id and not meeting_created_at:
+        meeting_created_at = _utc_now()
+    
     data = {
         "interview_id": interview_id,
         "candidate_id": candidate_id,
@@ -170,6 +103,7 @@ async def insert_interview(
         "scheduled_time": scheduled_time,
         "timezone": timezone_str,
         "avatar_key": avatar_key,
+        "organization_id": organization_id,
         "interview_status": InterviewStatus.SCHEDULED.value,
         "job_title": job_title,
         "job_description": job_description,
@@ -186,25 +120,31 @@ async def insert_interview(
         "meeting_url": meeting_url,
         "meeting_passcode": meeting_passcode,
         "meeting_host_url": meeting_host_url,
+        "meeting_created_at": meeting_created_at,
         "questions": questions,
         "total_questions": total_questions,
         "notes": notes,
         "recruiter_id": recruiter_id,
-        "created_at": datetime.now(tz=timezone_utc()),
+        "created_at": _utc_now(),
     }
     
     # Filter out None values and build query
     json_columns = {"candidate_skills", "candidate_tech_stack", "candidate_employment_history", "questions"}
+    uuid_columns = {"organization_id"}  # UUID columns need special handling
     cols, placeholders, vals = [], [], []
     
     for k, v in data.items():
         if v is None:
             continue
         cols.append(k)
-        placeholders.append("%s")
         if k in json_columns:
+            placeholders.append("%s")
             vals.append(Jsonb(v))
+        elif k in uuid_columns:
+            placeholders.append("%s::uuid")
+            vals.append(v)
         else:
+            placeholders.append("%s")
             vals.append(v)
     
     query = f"""
@@ -278,11 +218,67 @@ async def get_interview_by_call(call_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+async def get_interview_by_agent(agent_id: str) -> Optional[Dict[str, Any]]:
+    """Get interview by Bey agent ID."""
+    db_url = _get_db_url()
+    try:
+        async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT * FROM candidate_interviews WHERE agent_id = %s ORDER BY created_at DESC LIMIT 1",
+                    (agent_id,)
+                )
+                row = await cur.fetchone()
+                return dict(row) if row else None
+    except Exception as e:
+        _log_event("error", "db_get_interview_by_agent_failed", agent_id=agent_id, error=str(e))
+        return None
+
+
+async def get_interviews_by_organization(
+    organization_id: str,
+    *,
+    status: Optional[str] = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Get all interviews for an organization."""
+    db_url = _get_db_url()
+    try:
+        async with await AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
+            async with conn.cursor() as cur:
+                if status:
+                    await cur.execute(
+                        """
+                        SELECT * FROM candidate_interviews 
+                        WHERE organization_id = %s::uuid AND interview_status = %s
+                        ORDER BY scheduled_time DESC
+                        LIMIT %s
+                        """,
+                        (organization_id, status, limit)
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        SELECT * FROM candidate_interviews 
+                        WHERE organization_id = %s::uuid
+                        ORDER BY scheduled_time DESC
+                        LIMIT %s
+                        """,
+                        (organization_id, limit)
+                    )
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
+    except Exception as e:
+        _log_event("error", "db_get_interviews_by_organization_failed", organization_id=organization_id, error=str(e))
+        return []
+
+
 async def list_interviews(
     *,
     status: Optional[str] = None,
     candidate_id: Optional[str] = None,
     job_id: Optional[str] = None,
+    organization_id: Optional[str] = None,
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     limit: int = 50,
@@ -303,6 +299,9 @@ async def list_interviews(
     if job_id:
         where_clauses.append("job_id = %s")
         params.append(job_id)
+    if organization_id:
+        where_clauses.append("organization_id = %s::uuid")
+        params.append(organization_id)
     if from_date:
         where_clauses.append("scheduled_time >= %s")
         params.append(from_date)
@@ -349,7 +348,7 @@ async def get_pending_interviews(
                     await cur.execute(
                         """
                         SELECT * FROM candidate_interviews 
-                        WHERE interview_status IN ('scheduled', 'meeting_created')
+                        WHERE interview_status = 'scheduled'
                           AND scheduled_time <= %s
                           AND scheduled_time >= %s
                         ORDER BY scheduled_time ASC
@@ -360,7 +359,7 @@ async def get_pending_interviews(
                     await cur.execute(
                         """
                         SELECT * FROM candidate_interviews 
-                        WHERE interview_status IN ('scheduled', 'meeting_created')
+                        WHERE interview_status = 'scheduled'
                           AND scheduled_time <= %s
                         ORDER BY scheduled_time ASC
                         """,
@@ -386,12 +385,16 @@ async def update_interview(
         "candidate_skills", "candidate_tech_stack", "candidate_employment_history",
         "questions", "conversation_log", "keyword_matches", "evaluation_raw"
     }
+    uuid_columns = {"organization_id"}
     
     set_parts, vals = [], []
     for k, v in updates.items():
         if k in json_columns and v is not None:
             set_parts.append(f"{k} = %s")
             vals.append(Jsonb(v))
+        elif k in uuid_columns and v is not None:
+            set_parts.append(f"{k} = %s::uuid")
+            vals.append(v)
         else:
             set_parts.append(f"{k} = %s")
             vals.append(v)
@@ -424,7 +427,7 @@ async def update_interview_status(
     
     # Set completed_at if terminal status
     if status in (InterviewStatus.COMPLETED, InterviewStatus.INCOMPLETE, InterviewStatus.FAILED, InterviewStatus.CANCELLED):
-        updates["completed_at"] = datetime.now(tz=timezone_utc())
+        updates["completed_at"] = _utc_now()
     
     return await update_interview(interview_id, **updates)
 
@@ -443,7 +446,7 @@ async def update_interview_meeting(
         meeting_url=meeting_url,
         meeting_passcode=meeting_passcode,
         meeting_host_url=meeting_host_url,
-        meeting_created_at=datetime.now(tz=timezone_utc()),
+        meeting_created_at=_utc_now(),
         interview_status=InterviewStatus.MEETING_CREATED.value,
     )
 
@@ -464,7 +467,7 @@ async def update_interview_bey(
         livekit_url=livekit_url,
         livekit_token=livekit_token,
         bot_id=bot_id,
-        avatar_joined_at=datetime.now(tz=timezone_utc()),
+        avatar_joined_at=_utc_now(),
         interview_status=InterviewStatus.WAITING_FOR_CANDIDATE.value,
     )
 
@@ -484,9 +487,9 @@ async def update_interview_results(
 ) -> bool:
     """Update interview with results after completion."""
     updates = {
-        "interview_ended_at": datetime.now(tz=timezone_utc()),
+        "interview_ended_at": _utc_now(),
         "interview_status": InterviewStatus.COMPLETED.value,
-        "completed_at": datetime.now(tz=timezone_utc()),
+        "completed_at": _utc_now(),
     }
     
     if conversation_log is not None:

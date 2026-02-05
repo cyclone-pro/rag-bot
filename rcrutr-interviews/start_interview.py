@@ -56,9 +56,17 @@ async def start_interview(interview_id: str):
     print(f"   Status: {interview.get('interview_status')}")
     
     meeting_url = interview.get('meeting_url')
+    meeting_host_url = interview.get('meeting_host_url')  # Host URL bypasses waiting room
+    
     if not meeting_url:
         print("   ❌ No meeting URL found!")
         return False
+    
+    # Use host URL for avatar (bypasses waiting room)
+    # Fall back to regular URL if host URL not available
+    avatar_meeting_url = meeting_host_url if meeting_host_url else meeting_url
+    
+    print(f"   Avatar will use: {'HOST URL (bypasses waiting room)' if meeting_host_url else 'Regular URL'}")
     
     # 2. Build candidate and job data for prompt
     print("\n2. Building interview prompt...")
@@ -140,13 +148,14 @@ async def start_interview(interview_id: str):
     
     # 5. Send avatar to Zoom meeting
     print("\n5. Sending avatar to Zoom meeting...")
-    print(f"   Meeting URL: {meeting_url}")
+    print(f"   Using HOST URL to bypass waiting room")
+    print(f"   Meeting URL: {avatar_meeting_url[:80]}...")
     
     bot_name = f"{avatar_name} - RCRUTR AI Interviewer"
     
     result = send_to_external_meeting(
         call_id=call.id,
-        meeting_url=meeting_url,
+        meeting_url=avatar_meeting_url,  # Use host URL!
         livekit_url=call.livekit_url,
         livekit_token=call.livekit_token,
         bot_name=bot_name,

@@ -95,6 +95,7 @@ def create_meeting(
     waiting_room: bool = True,
     auto_recording: str = "none",  # "none", "local", "cloud"
     password: Optional[str] = None,
+    join_before_host: bool = False,  # Allow participants before host
 ) -> Optional[ZoomMeeting]:
     """
     Create a Zoom meeting.
@@ -104,9 +105,10 @@ def create_meeting(
         start_time: When the meeting should start
         duration_minutes: Expected duration
         timezone: Timezone for the meeting
-        waiting_room: Enable waiting room (required for candidate admission control)
+        waiting_room: Enable waiting room (set False for fully autonomous)
         auto_recording: Recording setting
         password: Optional meeting password
+        join_before_host: Allow participants to join before host
     
     Returns:
         ZoomMeeting object or None if failed
@@ -125,19 +127,25 @@ def create_meeting(
             "timezone": timezone,
             "settings": {
                 "waiting_room": waiting_room,
-                "join_before_host": False,  # Participants wait for host (avatar)
+                "join_before_host": join_before_host,
                 "mute_upon_entry": True,
                 "auto_recording": auto_recording,
                 "meeting_authentication": False,
                 "participant_video": True,
                 "host_video": True,
+                # Alternative host can admit from waiting room
+                "alternative_hosts_email_notification": True,
             },
         }
         
         if password:
             payload["password"] = password
         
-        _log_event("info", "zoom_create_meeting", topic=topic, start_time=start_time_str)
+        _log_event("info", "zoom_create_meeting", 
+                   topic=topic, 
+                   start_time=start_time_str,
+                   waiting_room=waiting_room,
+                   join_before_host=join_before_host)
         
         response = requests.post(
             f"{ZOOM_API_BASE}/users/me/meetings",
@@ -152,13 +160,17 @@ def create_meeting(
         meeting = ZoomMeeting(
             id=str(data["id"]),
             join_url=data["join_url"],
-            start_url=data["start_url"],
+            start_url=data["start_url"],  # Host URL - bypasses waiting room
             password=data.get("password"),
             topic=data["topic"],
             start_time=start_time,
             duration=duration_minutes,
             timezone=timezone,
         )
+        
+        _log_event("info", "zoom_meeting_urls",
+                   join_url=meeting.join_url[:60],
+                   start_url=meeting.start_url[:60] if meeting.start_url else "None")
         
         _log_event("info", "zoom_meeting_created", 
                    meeting_id=meeting.id, 
@@ -225,39 +237,67 @@ def get_waiting_room_participants(meeting_id: str) -> List[ZoomParticipant]:
     """
     Get participants in the waiting room.
     
-    Note: This requires the meeting to be active and uses the
-    Dashboard API which may require additional permissions.
+    Uses the Zoom Dashboard API to get live meeting participants.
+    Requires: dashboard_meetings:read:admin scope
     """
     try:
         headers = _get_headers()
         
-        # Get live meeting participants
+        # Method 1: Try Dashboard API (more reliable for live meetings)
+        # GET /metrics/meetings/{meetingId}/participants
         response = requests.get(
-            f"{ZOOM_API_BASE}/meetings/{meeting_id}/participants",
+            f"{ZOOM_API_BASE}/metrics/meetings/{meeting_id}/participants",
             headers=headers,
-            params={"status": "waiting"},
+            params={"type": "waiting", "page_size": 30},
             timeout=30,
         )
+        
+        if response.status_code == 200:
+            data = response.json()
+            participants = []
+            for p in data.get("participants", []):
+                if p.get("status") == "waiting" or p.get("in_waiting_room"):
+                    participants.append(ZoomParticipant(
+                        id=p.get("id", p.get("user_id", p.get("participant_user_id", ""))),
+                        user_name=p.get("user_name", p.get("name", "")),
+                        email=p.get("email"),
+                        status="waiting",
+                    ))
+            
+            _log_event("info", "zoom_waiting_room_participants_dashboard", 
+                       meeting_id=meeting_id, count=len(participants))
+            return participants
+        
+        # Method 2: Try live meeting participants endpoint
+        response = requests.get(
+            f"{ZOOM_API_BASE}/live_meetings/{meeting_id}/participants",
+            headers=headers,
+            timeout=30,
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            participants = []
+            for p in data.get("participants", []):
+                if p.get("status") == "waiting":
+                    participants.append(ZoomParticipant(
+                        id=p.get("id", p.get("user_id", "")),
+                        user_name=p.get("user_name", p.get("name", "")),
+                        email=p.get("email"),
+                        status="waiting",
+                    ))
+            
+            _log_event("info", "zoom_waiting_room_participants_live", 
+                       meeting_id=meeting_id, count=len(participants))
+            return participants
         
         if response.status_code == 404:
             # Meeting not started yet
             return []
         
-        response.raise_for_status()
-        data = response.json()
-        
-        participants = []
-        for p in data.get("participants", []):
-            participants.append(ZoomParticipant(
-                id=p.get("id", p.get("user_id", "")),
-                user_name=p.get("user_name", p.get("name", "")),
-                email=p.get("email"),
-                status="waiting",
-            ))
-        
-        _log_event("info", "zoom_waiting_room_participants", 
-                   meeting_id=meeting_id, count=len(participants))
-        return participants
+        _log_event("warning", "zoom_waiting_room_api_failed",
+                   meeting_id=meeting_id, status=response.status_code)
+        return []
         
     except Exception as e:
         _log_event("error", "zoom_get_waiting_room_failed", meeting_id=meeting_id, error=str(e))
@@ -268,26 +308,47 @@ def admit_participant(meeting_id: str, participant_id: str) -> bool:
     """
     Admit a participant from waiting room to the meeting.
     
-    Note: This uses the Zoom Meetings API and requires the meeting to be active.
+    Uses PUT /live_meetings/{meetingId}/participants/{participantId}
+    Requires: meeting:write:admin scope
     """
     try:
         headers = _get_headers()
         
-        payload = {
-            "method": "admit",
-        }
+        # Method 1: Live meetings API
+        payload = {"action": "admit"}
         
+        response = requests.put(
+            f"{ZOOM_API_BASE}/live_meetings/{meeting_id}/participants/{participant_id}",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        
+        if response.status_code in (200, 204):
+            _log_event("info", "zoom_participant_admitted", 
+                       meeting_id=meeting_id, participant_id=participant_id)
+            return True
+        
+        # Method 2: Alternative endpoint
+        payload = {"method": "admit"}
         response = requests.put(
             f"{ZOOM_API_BASE}/meetings/{meeting_id}/participants/{participant_id}/status",
             headers=headers,
             json=payload,
             timeout=30,
         )
-        response.raise_for_status()
         
-        _log_event("info", "zoom_participant_admitted", 
-                   meeting_id=meeting_id, participant_id=participant_id)
-        return True
+        if response.status_code in (200, 204):
+            _log_event("info", "zoom_participant_admitted_alt", 
+                       meeting_id=meeting_id, participant_id=participant_id)
+            return True
+        
+        _log_event("warning", "zoom_admit_failed",
+                   meeting_id=meeting_id, 
+                   participant_id=participant_id,
+                   status=response.status_code,
+                   response=response.text[:200] if response.text else None)
+        return False
         
     except Exception as e:
         _log_event("error", "zoom_admit_participant_failed", 

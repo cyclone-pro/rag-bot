@@ -1,8 +1,13 @@
 """
 Scheduler for triggering interviews at their scheduled times.
 
-This module can be run as a standalone worker or integrated with
-Google Cloud Scheduler + Cloud Tasks for production.
+This module ensures avatars join meetings at the correct scheduled time,
+not immediately when the interview is created.
+
+Can be run as:
+1. Standalone worker: python scheduler.py --loop
+2. One-time check: python scheduler.py --once
+3. Cloud Scheduler trigger: POST /api/scheduler/check
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, List
 
 from config import SERVICE_NAME
-from db import get_pending_interviews, update_interview_status
+from db import get_pending_interviews, update_interview_status, get_interview
 from models import InterviewStatus
 
 logger = logging.getLogger(f"{SERVICE_NAME}_scheduler")
@@ -28,24 +33,28 @@ def _log_event(level: str, message: str, **fields: Any) -> None:
 
 async def check_and_start_interviews():
     """
-    Check for interviews that should start and trigger them.
+    Check for interviews that should start NOW and trigger them.
     
     This function looks for interviews:
     - With status 'scheduled' or 'meeting_created'
     - With scheduled_time in the past or within next 2 minutes
+    
+    It does NOT start interviews scheduled for the future.
     """
     now = datetime.now(tz=timezone.utc)
-    window_end = now + timedelta(minutes=2)
+    window_start = now - timedelta(hours=1)  # Don't process very old ones
+    window_end = now + timedelta(minutes=2)   # Start up to 2 min early
     
     _log_event("info", "scheduler_check_start", 
                current_time=now.isoformat(),
+               window_start=window_start.isoformat(),
                window_end=window_end.isoformat())
     
     try:
-        # Get pending interviews
+        # Get pending interviews within the window
         interviews = await get_pending_interviews(
             before_time=window_end,
-            after_time=now - timedelta(hours=1),  # Don't process interviews more than 1 hour old
+            after_time=window_start,
         )
         
         if not interviews:
@@ -58,19 +67,26 @@ async def check_and_start_interviews():
         for interview in interviews:
             interview_id = interview["interview_id"]
             scheduled_time = interview.get("scheduled_time")
+            status = interview.get("interview_status")
             
-            # Check if it's time to start
+            # Only start if it's time
             if scheduled_time and scheduled_time <= window_end:
                 _log_event("info", "scheduler_starting_interview",
                            interview_id=interview_id,
-                           scheduled_time=scheduled_time.isoformat() if scheduled_time else None)
+                           scheduled_time=scheduled_time.isoformat() if scheduled_time else None,
+                           current_status=status)
                 
                 # Import here to avoid circular imports
-                from app import execute_interview
+                from start_interview import start_interview_async
                 
-                # Start the interview
-                asyncio.create_task(execute_interview(interview_id))
+                # Start the interview (sends avatar to meeting)
+                asyncio.create_task(start_interview_async(interview_id))
                 started.append(interview_id)
+            else:
+                _log_event("info", "scheduler_interview_not_ready",
+                           interview_id=interview_id,
+                           scheduled_time=scheduled_time.isoformat() if scheduled_time else None,
+                           message="Scheduled for future")
         
         return started
         
@@ -79,12 +95,27 @@ async def check_and_start_interviews():
         return []
 
 
+async def get_upcoming_interviews(hours: int = 24) -> List[dict]:
+    """
+    Get interviews scheduled in the next N hours.
+    Also includes any past interviews still in 'scheduled' status (missed).
+    """
+    now = datetime.now(tz=timezone.utc)
+    future = now + timedelta(hours=hours)
+    past = now - timedelta(hours=1)  # Include interviews up to 1 hour overdue
+    
+    return await get_pending_interviews(
+        before_time=future,
+        after_time=past,  # Changed from 'now' to include missed interviews
+    )
+
+
 async def run_scheduler_loop(interval_seconds: int = 30):
     """
     Run the scheduler in a continuous loop.
     
     This is useful for local development or running as a standalone worker.
-    In production, use Cloud Scheduler to call the /api/scheduler/run endpoint.
+    In production, use Cloud Scheduler to call the /api/scheduler/check endpoint.
     """
     _log_event("info", "scheduler_loop_starting", interval_seconds=interval_seconds)
     
@@ -92,7 +123,8 @@ async def run_scheduler_loop(interval_seconds: int = 30):
         try:
             started = await check_and_start_interviews()
             if started:
-                _log_event("info", "scheduler_loop_started_interviews", count=len(started))
+                _log_event("info", "scheduler_loop_started_interviews", 
+                           count=len(started), interview_ids=started)
         except Exception as e:
             _log_event("error", "scheduler_loop_error", error=str(e))
         

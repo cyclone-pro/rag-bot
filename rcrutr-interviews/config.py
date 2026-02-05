@@ -73,6 +73,12 @@ MILVUS_QA_COLLECTION: str = os.getenv("MILVUS_QA_COLLECTION", "qa_embeddings_v2"
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+# External LLM API ID for Bey (run setup_openai_llm.py to get this)
+# When set, agents will use GPT-4o-mini for smarter responses
+BEY_LLM_API_ID: Optional[str] = os.getenv("BEY_LLM_API_ID")
+BEY_LLM_MODEL: str = os.getenv("BEY_LLM_MODEL", "gpt-4o-mini")
+BEY_LLM_TEMPERATURE: float = float(os.getenv("BEY_LLM_TEMPERATURE", "0.7"))
+
 # =============================================================================
 # HUGGINGFACE (for embeddings)
 # =============================================================================
