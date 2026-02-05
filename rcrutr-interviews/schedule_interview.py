@@ -38,38 +38,82 @@ from config import BEY_LLM_API_ID
 
 
 def get_test_candidate() -> CandidateData:
-    """Return test candidate data."""
+    """Return test candidate data for a mid-level Python developer."""
     return CandidateData(
         candidate_id="test_cand_python_001",
         name="Alex Johnson",
         email="alex.johnson@example.com",
         phone="+1-555-0123",
         semantic_summary="""
-        Mid-level Python developer with 4 years of experience in backend development.
-        Strong expertise in FastAPI, Django, and Flask frameworks. Experienced with 
-        vector databases including Milvus and Pinecone. Has worked extensively with 
-        GCP services including Cloud Run, Cloud SQL, BigQuery, and Vertex AI.
+        Mid-level Python developer with 4 years of experience building backend systems.
+        Strong hands-on experience with FastAPI (v0.100+), async programming, and RESTful APIs.
+        Built and deployed microservices on GCP Cloud Run. Experienced with PostgreSQL for 
+        relational data and recently worked with Milvus for vector search applications.
+        Familiar with Docker, CI/CD pipelines, and agile development practices.
+        Currently working on a RAG-based AI application using LangChain and OpenAI APIs.
         """,
-        current_tech_stack=["Python", "FastAPI", "PostgreSQL", "Milvus", "GCP", "Docker"],
-        top_5_skills_with_years="Python:4, FastAPI:3, PostgreSQL:4, GCP:3, Milvus:2",
+        current_tech_stack=["Python", "FastAPI", "PostgreSQL", "Milvus", "GCP Cloud Run", "Docker", "Redis", "LangChain"],
+        top_5_skills_with_years="Python:4, FastAPI:2.5, PostgreSQL:4, Docker:3, GCP:2",
         employment_history=[
-            {"company": "TechCorp Inc", "title": "Backend Developer", "start_date": "2022-01", "end_date": "Present"},
+            {
+                "company": "TechCorp Solutions",
+                "title": "Backend Developer",
+                "start_date": "2022-03",
+                "end_date": "Present",
+                "description": "Building AI-powered recruitment platform with FastAPI, PostgreSQL, and vector databases"
+            },
+            {
+                "company": "DataFlow Inc",
+                "title": "Junior Python Developer", 
+                "start_date": "2020-06",
+                "end_date": "2022-02",
+                "description": "Developed REST APIs and data pipelines using Django and PostgreSQL"
+            },
         ]
     )
 
 
 def get_test_job() -> JobData:
-    """Return test job data."""
+    """Return test job data for a mid-level Python developer role."""
     return JobData(
         job_id="test_job_python_001",
         title="Mid-Level Python Developer",
         company="Elite Solutions",
         location="Remote / US",
         jd_text="""
-Title: Mid-Level Python Developer
-Required Skills: Python, FastAPI, PostgreSQL, Vector databases, GCP, Docker
-Responsibilities: Backend APIs, Vector search systems, GCP deployment
-Salary: $100,000 - $130,000
+POSITION: Mid-Level Python Developer
+COMPANY: Elite Solutions
+LOCATION: Remote (US-based)
+SALARY: $100,000 - $130,000
+
+ABOUT THE ROLE:
+We're looking for a Mid-Level Python Developer to join our AI platform team. You'll be 
+building backend services for our next-generation recruitment AI system, working with 
+cutting-edge technologies including vector databases, LLMs, and real-time processing.
+
+REQUIREMENTS:
+- 3-5 years of Python development experience
+- Strong experience with FastAPI or similar async frameworks
+- Solid understanding of PostgreSQL and database design
+- Experience with vector databases (Milvus, Pinecone, pgvector) is a plus
+- Familiarity with GCP or AWS cloud services
+- Experience with Docker and containerization
+- Understanding of async programming and its use cases
+- Good understanding of REST API design principles
+
+NICE TO HAVE:
+- Experience with LangChain or similar LLM frameworks
+- Knowledge of embedding models and semantic search
+- Experience with Redis for caching
+- Familiarity with Kubernetes
+
+WHAT YOU'LL DO:
+- Design and build backend APIs using FastAPI
+- Work with vector databases for semantic search features
+- Optimize database queries and system performance
+- Deploy and manage services on GCP Cloud Run
+- Collaborate with ML engineers on AI integrations
+- Participate in code reviews and technical discussions
 """
     )
 

@@ -209,6 +209,27 @@ async def start_interview(interview_id: str) -> bool:
     
     print(f"   ✅ Database updated")
     
+    # 7. Start candidate timeout (background task)
+    print("\n7. Starting candidate timeout...")
+    print(f"   ⏱️ Candidate has 10 minutes to join, otherwise interview will be cancelled")
+    
+    # Import and start timeout (runs in background)
+    try:
+        from interview_manager import start_candidate_timeout, register_active_interview
+        
+        # Register this interview as active
+        register_active_interview(
+            interview_id=interview_id,
+            agent_id=agent.id,
+            call_id=call.id,
+        )
+        
+        # Start timeout in background (non-blocking)
+        asyncio.create_task(start_candidate_timeout(interview_id, timeout_minutes=10))
+        print(f"   ✅ Timeout started")
+    except Exception as e:
+        print(f"   ⚠️ Could not start timeout: {e}")
+    
     # Success!
     print("\n" + "=" * 60)
     print("✅ AVATAR SENT TO MEETING SUCCESSFULLY!")
@@ -221,6 +242,9 @@ Bot ID:       {result.bot_id}
 
 The avatar ({avatar_name}) should now be joining the Zoom meeting.
 It will greet the candidate when they join.
+
+⏱️ TIMEOUT: If candidate doesn't join within 10 minutes, the interview
+   will be automatically cancelled and the avatar will leave.
 
 Meeting URL: {meeting_url}
 """)

@@ -201,6 +201,36 @@ def create_call(agent_id: str, username: str = "Candidate") -> Optional[BeyCall]
         return None
 
 
+def end_call(call_id: str) -> bool:
+    """
+    End a call session.
+    
+    This will disconnect the avatar from the meeting.
+    """
+    try:
+        headers = _get_headers()
+        
+        _log_event("info", "bey_end_call_request", call_id=call_id)
+        
+        response = requests.post(
+            f"{BEY_API_URL}/calls/{call_id}/end",
+            headers=headers,
+            timeout=30,
+        )
+        
+        # Accept 200, 204, or 404 (already ended)
+        if response.status_code in (200, 204, 404):
+            _log_event("info", "bey_end_call_ok", call_id=call_id)
+            return True
+        
+        response.raise_for_status()
+        return True
+        
+    except Exception as e:
+        _log_event("error", "bey_end_call_failed", call_id=call_id, error=str(e))
+        return False
+
+
 def send_to_external_meeting(
     call_id: str,
     meeting_url: str,
