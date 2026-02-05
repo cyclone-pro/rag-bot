@@ -80,7 +80,7 @@ async def lifespan(app: FastAPI):
     if db_ok:
         _log_event("info", "db_connection_ok")
     else:
-        _log_event("warning", "db_connection_failed", error=db_msg)
+        _log_event("warning", "db_connection_failed", message=db_msg)
     
     yield
     

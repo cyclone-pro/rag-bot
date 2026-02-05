@@ -197,6 +197,27 @@ async def schedule_interview(
     
     print(f"   ✅ Interview saved: {interview_id}")
     
+    # 6. Send email invitation to candidate
+    print("\n6. Sending email invitation...")
+    from email_notifications import send_interview_invitation
+    
+    email_result = send_interview_invitation(
+        candidate_email=candidate.email,
+        candidate_name=candidate.name,
+        job_title=job.title,
+        company=job.company,
+        scheduled_time=scheduled_time,
+        meeting_url=meeting.join_url,
+        meeting_passcode=meeting.password,
+        avatar_name=avatar.title(),
+    )
+    
+    if email_result.success:
+        print(f"   ✅ Email sent to {candidate.email}")
+    else:
+        print(f"   ⚠️ Email failed: {email_result.error}")
+        print(f"   (Interview still scheduled - share link manually)")
+    
     # Summary
     print("\n" + "=" * 60)
     print("✅ INTERVIEW SCHEDULED!")

@@ -4,10 +4,10 @@ Start an interview - sends the AI avatar to the Zoom meeting.
 
 This script:
 1. Looks up the interview from database
-2. Creates Bey agent with interview prompt
+2. Creates Bey agent with interview prompt (using GPT-4o-mini if configured)
 3. Creates call session
 4. Sends avatar to Zoom meeting
-5. Avatar joins and waits for candidate
+5. Avatar joins and conducts the interview
 
 Usage:
   python start_interview.py int_759d1598e5b0
@@ -27,14 +27,23 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 load_dotenv()
 
-from config import BEY_API_KEY, AVATARS, DEFAULT_AVATAR
+from config import BEY_API_KEY, AVATARS, DEFAULT_AVATAR, BEY_LLM_API_ID
 from db import get_interview, update_interview, update_interview_status
 from models import InterviewStatus, CandidateData, JobData
 from bey_client import create_agent, create_call, send_to_external_meeting, get_avatar_config
 from interview_prompt import build_interview_prompt
 
 
-async def start_interview(interview_id: str):
+async def start_interview_async(interview_id: str) -> bool:
+    """
+    Async version of start_interview for use by scheduler.
+    
+    This is the main function that sends the avatar to the meeting.
+    """
+    return await start_interview(interview_id)
+
+
+async def start_interview(interview_id: str) -> bool:
     """Start an interview by sending the avatar to Zoom."""
     
     print("=" * 60)
@@ -97,6 +106,7 @@ async def start_interview(interview_id: str):
     avatar_id = avatar_config['id']
     
     print(f"   Avatar: {avatar_name} ({avatar_key})")
+    print(f"   LLM: {'GPT-4o-mini (external)' if BEY_LLM_API_ID else 'Bey default'}")
     
     # Build the prompt
     prompt_config = build_interview_prompt(
@@ -129,6 +139,19 @@ async def start_interview(interview_id: str):
         return False
     
     print(f"   ✅ Agent created: {agent.id}")
+    
+    # Register agent with organization (for webhook routing)
+    organization_id = interview.get('organization_id')
+    if organization_id:
+        from webhook_handler import register_agent_for_org
+        await register_agent_for_org(
+            agent_id=agent.id,
+            organization_id=str(organization_id),
+            agent_name=agent_name,
+            avatar_key=avatar_key,
+            purpose="interview",
+        )
+        print(f"   ✅ Agent registered for org: {organization_id}")
     
     # 4. Create call session
     print("\n4. Creating call session...")
