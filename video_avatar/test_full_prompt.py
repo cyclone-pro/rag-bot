@@ -20,7 +20,7 @@ except ImportError:
     print("⚠️  agent_prompt.py not found - using inline prompt")
 
 
-def test_full_prompt(avatar_key: str = "zara", username: str = "Wahed"):
+def test_full_prompt(avatar_key: str = "zara", username: str = "Amit"):
     """Test creating an agent with the FULL production prompt."""
     
     if not BEY_API_KEY:
@@ -179,6 +179,6 @@ if __name__ == "__main__":
     import sys
     
     avatar = sys.argv[1] if len(sys.argv) > 1 else "zara"
-    username = sys.argv[2] if len(sys.argv) > 2 else "Wahed"
+    username = sys.argv[2] if len(sys.argv) > 2 else "Amit"
     
     test_full_prompt(avatar, username)

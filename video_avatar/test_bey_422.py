@@ -29,7 +29,7 @@ def test_with_full_error_capture():
     avatar_config = get_avatar_config("zara")
     config = build_agent_config(
         call_history=[],
-        username="Wahed",
+        username="Amit",
         agent_name=avatar_config["name"],
         avatar_id=avatar_config["id"],
     )
