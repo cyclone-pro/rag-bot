@@ -344,7 +344,7 @@ async def run_autonomous_interview(interview_id: str):
     print("✅ AVATAR SENT TO MEETING!")
     print("=" * 60)
     print("""
-The avatar is joining the Zoom meeting now.
+The avatar has entered the lobby and is joining the call.
 
 WHAT HAPPENS NEXT:
 1. Avatar (Zara) joins the meeting

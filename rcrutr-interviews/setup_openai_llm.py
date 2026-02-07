@@ -83,10 +83,16 @@ def list_llm_configs():
     
     if response.status_code == 200:
         configs = response.json()
+        if isinstance(configs, dict):
+            configs = configs.get("data") or configs.get("items") or []
         if not configs:
             print("   No configurations found")
         for config in configs:
-            print(f"   - {config['name']} (ID: {config['id']})")
+            if not isinstance(config, dict):
+                continue
+            name = config.get("name", "unknown")
+            config_id = config.get("id", "unknown")
+            print(f"   - {name} (ID: {config_id})")
         return configs
     else:
         print(f"   Failed to list: {response.status_code}")

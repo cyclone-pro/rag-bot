@@ -34,7 +34,7 @@ from zoom_client import create_meeting
 from interview_prompt import generate_interview_questions, format_questions_for_db
 from milvus_client import get_candidate, get_job
 from models import CandidateData, JobData, InterviewStatus
-from config import BEY_LLM_API_ID
+from config import BEY_LLM_API_ID, BEY_LLM_MODEL
 
 
 def get_test_candidate() -> CandidateData:
@@ -274,7 +274,7 @@ Interview Details:
   Scheduled:     {scheduled_time.strftime('%Y-%m-%d %H:%M UTC')}
   Time Until:    {hours}h {minutes}m
   Avatar:        {avatar.title()}
-  LLM:           {'GPT-4o-mini' if BEY_LLM_API_ID else 'Bey default'}
+  LLM:           {f"{BEY_LLM_MODEL} (external)" if BEY_LLM_API_ID else "Bey default"}
 
 Meeting Details:
   URL:           {meeting.join_url}

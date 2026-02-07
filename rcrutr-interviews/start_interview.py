@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 load_dotenv()
 
-from config import BEY_API_KEY, AVATARS, DEFAULT_AVATAR, BEY_LLM_API_ID
+from config import BEY_API_KEY, AVATARS, DEFAULT_AVATAR, BEY_LLM_API_ID, BEY_LLM_MODEL
 from db import get_interview, update_interview, update_interview_status
 from models import InterviewStatus, CandidateData, JobData
 from bey_client import create_agent, create_call, send_to_external_meeting, get_avatar_config
@@ -105,8 +105,9 @@ async def start_interview(interview_id: str) -> bool:
     avatar_name = avatar_config['name']
     avatar_id = avatar_config['id']
     
+    llm_label = f"{BEY_LLM_MODEL} (external)" if BEY_LLM_API_ID else "Bey default"
     print(f"   Avatar: {avatar_name} ({avatar_key})")
-    print(f"   LLM: {'GPT-4o-mini (external)' if BEY_LLM_API_ID else 'Bey default'}")
+    print(f"   LLM: {llm_label}")
     
     # Build the prompt
     prompt_config = build_interview_prompt(
@@ -240,7 +241,7 @@ Agent ID:     {agent.id}
 Call ID:      {call.id}
 Bot ID:       {result.bot_id}
 
-The avatar ({avatar_name}) should now be joining the Zoom meeting.
+{avatar_name} has entered the lobby and is joining the call.
 It will greet the candidate when they join.
 
 ⏱️ TIMEOUT: If candidate doesn't join within 10 minutes, the interview
